@@ -31,9 +31,9 @@ Requires Node.js 24+ and npm.
 ```sh
 npm ci
 cp .env.example .env
-# Set PUBLIC_BASE_URL and TWILIO_AUTH_TOKEN in .env.
-npm run dev
 ```
+
+Configure `.env` and start the app using the tunnel instructions below.
 
 `MODE=demo` uses in-memory storage, synthetic FAQs, and a deterministic planner.
 It makes no Azure, Elasticsearch, or LLM calls. Data resets on restart.
@@ -42,11 +42,76 @@ Try “availability”, “book slot-2”, “yes”, “reschedule appointment-
 cloud mode lets the model interpret natural-language dates and times.
 All spoken times use `HOSPITAL_TIME_ZONE`.
 
-Expose port 3000 through an HTTPS tunnel or deploy behind HTTPS.
-Set `PUBLIC_BASE_URL` to that exact public origin, without a trailing path.
-In your Twilio phone number's Voice configuration, set **A call comes in** to
-`https://your-public-host/voice`, method **POST**.
-Set the Twilio account auth token, not an API key, in `TWILIO_AUTH_TOKEN`.
+### Public base URL for local development and demos
+
+Twilio needs a public HTTPS URL to reach your local app; it cannot reach
+`localhost` directly. A Cloudflare Quick Tunnel provides a temporary URL without
+requiring a Cloudflare account or your own domain.
+
+1. Install Cloudflare Tunnel on macOS with Homebrew:
+
+   ```sh
+   brew install cloudflared
+   ```
+
+2. Start a tunnel to the app's local port:
+
+   ```sh
+   cloudflared tunnel --url http://localhost:3000
+   ```
+
+   Keep this terminal running. Copy the HTTPS URL printed by the command,
+   for example `https://random-words.trycloudflare.com`. If you change `PORT`
+   in `.env`, use that same port in the tunnel command.
+
+3. Set these values in `.env`:
+
+   ```dotenv
+   MODE=demo
+   PUBLIC_BASE_URL=https://random-words.trycloudflare.com
+   TWILIO_AUTH_TOKEN=your-twilio-account-auth-token
+   ```
+
+   Replace the example URL with your actual tunnel URL. Use only the origin:
+   do not append `/voice` or a query string. Use your Twilio **account auth
+   token**, not an API key. Never commit `.env` or share the token.
+   `MODE=demo` keeps this walkthrough synthetic and local; use `MODE=cloud`
+   only after completing the cloud-backed demo setup below.
+
+4. In a separate terminal, start the app:
+
+   ```sh
+   npm run dev
+   ```
+
+   Check the public URL, replacing the example hostname:
+
+   ```sh
+   curl https://random-words.trycloudflare.com/healthz
+   ```
+
+   Expect `{"status":"ok","mode":"demo","syntheticDataOnly":true}`.
+
+5. In **Twilio Console → Phone Numbers → Manage → Active numbers**, select
+   your Voice-capable number. Under **Voice configuration**, set
+   **A call comes in** to **Webhook**, enter
+   `https://random-words.trycloudflare.com/voice`, choose **HTTP POST**, and save.
+   **Configure the Voice webhook, not the Messaging webhook.**
+
+6. Call the Twilio number and try the synthetic appointment workflow.
+
+For a live demo, leave both the app and tunnel running and keep your computer
+awake with a working internet connection. Test a call before presenting.
+Quick Tunnel URLs change when the tunnel restarts: update `PUBLIC_BASE_URL`
+and the Twilio Voice webhook, then restart the app to reload `.env`.
+Stop the tunnel when finished to remove public access.
+
+For a repeatable demo with a stable URL, use a named Cloudflare Tunnel with a
+domain you control, or deploy the app behind a stable HTTPS endpoint. Set
+`PUBLIC_BASE_URL` and the Twilio Voice webhook to that hostname in the same way.
+The tunnel is only transport; it does not make the app suitable for real patient
+data.
+
 Signatures are checked against the configured public URL, including query
 parameters; the application does not trust forwarded host headers.
 No call recording is enabled by this application.
