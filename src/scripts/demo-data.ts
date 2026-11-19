@@ -131,7 +131,7 @@ export function generatePatients(clinics: Clinic[], seed = 42, asOf = DEFAULT_AS
     }).toISOString().slice(0, 10);
     return {
       id, patient_id: id, is_demo: true, demo_dataset: DATASET,
-      first_name: `Demo ${fake.person.firstName()}`, last_name: fake.person.lastName(),
+      first_name: fake.person.firstName(), last_name: fake.person.lastName(),
       dob, phone: `+121255501${String(patientIndex).padStart(2, "0")}`,
       email: `${id}@example.com`,
       preferred_language: fake.helpers.arrayElement(["en", "es", "zh", "ru"] as const),

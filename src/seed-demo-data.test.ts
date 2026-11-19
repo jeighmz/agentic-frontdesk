@@ -14,6 +14,7 @@ test("seeded generation is deterministic, varied and referentially consistent", 
   assert.notDeepEqual(generatePatients(clinics, 43), patients);
   assert.equal(clinics.length, 10);
   assert.equal(patients.length, 100);
+  assert.ok(patients.every((patient) => !patient.first_name.startsWith("Demo ")));
   const referrals = patients.flatMap((patient) => patient.referrals);
   assert.equal(referrals.length, 125);
   assert.equal(patients.filter((patient) => patient.referrals.length === 1).length, 80);

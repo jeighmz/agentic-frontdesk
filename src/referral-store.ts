@@ -1,15 +1,45 @@
 import { CosmosClient, type Container, type SqlQuerySpec } from "@azure/cosmos";
 import { DefaultAzureCredential } from "@azure/identity";
+import { observeOperation } from "./logging.ts";
 import { AVAILABILITY_DATASET, slotSchema, type AppointmentSlot } from "./availability.ts";
 import {
-  CLINICS_CONTAINER, PATIENTS_CONTAINER, REFERRALS_DATABASE, SLOTS_CONTAINER,
-  clinicSchema, patientSchema, type Clinic, type Patient, type Service,
+  CLINICS_CONTAINER, DATASET, PATIENTS_CONTAINER, REFERRALS_DATABASE, SLOTS_CONTAINER,
+  clinicSchema, normalizePatientFullName, patientSchema, type Clinic, type Patient, type Service,
 } from "./referral-models.ts";
 
 export interface ReferralStore {
   patient(id: string): Promise<Patient | null>;
+  patientsByFullName(fullName: string): Promise<Patient[]>;
   clinic(id: string): Promise<Clinic>;
   availability(clinicId: string, service: Service, now: number): Promise<AppointmentSlot[]>;
+}
+
+type PatientNameReader = {
+  items: {
+    query(query: SqlQuerySpec): { fetchAll(): Promise<{ resources: unknown[] }> };
+  };
+};
+
+export async function readPatientsByFullName(container: PatientNameReader, fullName: string): Promise<Patient[]> {
+  const name = normalizePatientFullName(fullName);
+  if (!name) throw new Error("Patient lookup requires a first and last name");
+  const result = await container.items.query({
+    query: `SELECT TOP 2 * FROM c WHERE c.is_demo = true AND c.demo_dataset = @dataset
+      AND (STRINGEQUALS(CONCAT(TRIM(c.first_name), " ", TRIM(c.last_name)), @fullName, true)
+      OR STRINGEQUALS(CONCAT(TRIM(c.first_name), " ", TRIM(c.last_name)), @demoFullName, true))`,
+    parameters: [
+      { name: "@dataset", value: DATASET },
+      { name: "@fullName", value: name },
+      { name: "@demoFullName", value: `demo ${name}` },
+    ],
+  }).fetchAll();
+  return result.resources.map((document) => {
+    const patient = patientSchema.parse(document);
+    if (normalizePatientFullName(`${patient.first_name} ${patient.last_name}`) !== name) {
+      throw new Error("Cosmos returned a patient inconsistent with the full-name request");
+    }
+    return patient;
+  });
 }
 
 export function availabilityQuery(service: Service, now: number): SqlQuerySpec {
@@ -75,26 +105,34 @@ export class CosmosReferralStore implements ReferralStore {
   }
 
   async checkContainers() {
-    await Promise.all([
+    await observeOperation("cosmos.containers.check", () => Promise.all([
       assertPartitionKey(this.patients, "/id"),
       assertPartitionKey(this.clinics, "/id"),
       assertPartitionKey(this.slots, "/clinic_id"),
-    ]);
+    ]));
   }
 
   async patient(id: string): Promise<Patient | null> {
-    const result = await this.patients.item(id, id).read();
-    if (result.statusCode === 404) return null;
-    return patientSchema.parse(result.resource);
+    return observeOperation("cosmos.patient.read", async () => {
+      const result = await this.patients.item(id, id).read();
+      if (result.statusCode === 404) return null;
+      return patientSchema.parse(result.resource);
+    });
+  }
+
+  async patientsByFullName(fullName: string): Promise<Patient[]> {
+    return observeOperation("cosmos.patient.name_query", () => readPatientsByFullName(this.patients, fullName));
   }
 
   async clinic(id: string): Promise<Clinic> {
-    const result = await this.clinics.item(id, id).read();
-    return clinicSchema.parse(result.resource);
+    return observeOperation("cosmos.clinic.read", async () => {
+      const result = await this.clinics.item(id, id).read();
+      return clinicSchema.parse(result.resource);
+    });
   }
 
   async availability(clinicId: string, service: Service, now: number): Promise<AppointmentSlot[]> {
-    return readAvailableSlots(this.slots, clinicId, service, now);
+    return observeOperation("cosmos.slots.query", () => readAvailableSlots(this.slots, clinicId, service, now));
   }
 
   close() {

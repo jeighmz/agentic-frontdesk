@@ -237,7 +237,8 @@ The dataset includes:
   and `example.com` emails. Names, addresses, providers, reasons, and identifiers
   are generated demo fixtures, not real patient information.
 - An `is_demo: true` flag and `demo_dataset: "hospital-referrals-demo-v1"` marker
-  on every clinic/patient document.
+  on every clinic/patient document. Patient first names are generated without
+  a `Demo ` prefix; these markers identify the data as fictional instead.
 
 **Deterministic dates:** the default reference time is fixed at
 `2026-11-18T12:00:00.000Z`, so the same seed produces the same dataset on reruns.
@@ -337,7 +338,19 @@ npm run dev
 
 Startup verifies all three containers and their partition keys. Call the Twilio
 number and say **"patient one"** (or `patient_001`). The handler accepts demo
-patient numbers 1–100, not personal names or dates of birth.
+patient numbers 1–100 or a seeded fictional patient's **first and last name**.
+You can say the name directly or **"my name is [fictional first and last name]"**.
+Find test names in the `patients` container's `first_name` and `last_name` fields.
+Older records may still have a `Demo ` prefix; it is optional when speaking.
+Never provide a real person's name or date of birth.
+
+Full-name lookup is case-insensitive and normalizes spoken whitespace and curly
+apostrophes. It requires the complete first and last name, not a first name,
+partial match, or fuzzy spelling. If no record matches, try the fictional name
+again or use the demo patient number. If multiple records match, no patient is
+selected and the caller must use a demo patient number; the app does not read
+candidate names, dates of birth, or contact details. Patient-number lookup
+continues to work as before.
 
 - If the patient has one active referral, it reads the next three available
   slots for that destination clinic and service.
@@ -346,18 +359,52 @@ patient numbers 1–100, not personal names or dates of birth.
 - Active states are `pending_contact`, `contacted`, `scheduling`, and
   `unable_to_reach`. Already scheduled, declined, or completed referrals are
   excluded. A patient may have no active referrals; try another demo number.
-- Say **"availability"** to refresh, another patient number to switch patients,
-  or **"staff"** to use the configured handoff.
+- Say **"availability"** to refresh, another patient number or fictional full
+  name to switch patients, or **"staff"** to use the configured handoff.
 - Booking, confirmation, and rescheduling are explicitly disabled: no slots are
   reserved and no patient/referral documents are changed.
 
 The voice service performs reads only and requires Cosmos data-plane read
 access; the slot seeder requires write access. Only documents matching the demo
-schemas/markers are accepted. There is no patient authentication, so never use
-this mode with real patient data. Call state is process-local, expires after
+schemas/markers are accepted. **Full-name matching is not identity verification.**
+There is no patient authentication, so never use this mode with real patient
+data. Call state is process-local, expires after
 30 minutes of inactivity on the next request, and resets on restart. Use a single
 app instance for this demo; multiple instances would need shared call state.
 The same 100-active-call and 20-turn demo limits apply.
+
+### Terminal diagnostics
+
+Restart `npm run dev` after code changes; it does not automatically reload.
+Voice requests now print structured JSON logs to the app terminal:
+
+- `voice_request_started` / `voice_request_completed`: mode, generated request
+  ID, HTTP status, and elapsed milliseconds. The ID is also returned in the
+  `x-request-id` response header.
+- `voice_turn_received`: turn number and whether speech was provided, **not**
+  the speech text.
+- `dependency_operation_started` / `dependency_operation_completed` /
+  `dependency_operation_failed`: the specific referral Cosmos operation
+  (`cosmos.patient.read`, `cosmos.patient.name_query`, `cosmos.clinic.read`, or
+  `cosmos.slots.query`), duration,
+  and safe error details. Container checks are logged at startup as well.
+- `voice_request_failed`: sanitized error type, Cosmos HTTP/substatus codes and
+  activity ID when available, troubleshooting hints, or schema issue field
+  paths/codes. Raw error messages, stacks, documents, and validation values are
+  deliberately excluded.
+- `voice_request_rejected`: signature failures (403) or malformed payloads (400).
+  Check `PUBLIC_BASE_URL`, the current tunnel URL, and `TWILIO_AUTH_TOKEN` if
+  signature validation fails.
+- `voice_request_slow`: no response after 8 seconds; this is a warning, not a
+  change to request timeouts. `voice_request_aborted` means the connection closed
+  before a response finished.
+
+Logs sharing a request ID belong to the same webhook request. If Twilio says
+"an application error has occurred" but no request-start log appears, check the
+tunnel and Twilio **Monitor → Logs → Calls** error details. If a request starts
+but stalls, the last dependency-start log identifies the operation to investigate.
+HTTP 200 on the final error response means the app returned a spoken error/handoff
+message, **not** that the requested operation succeeded.
 
 ## Boundaries and next steps
 
@@ -381,9 +428,9 @@ The same 100-active-call and 20-turn demo limits apply.
 - Concurrent aggregate writes fail closed with an explicit uncertainty message
   and handoff, rather than claiming success. Staff should check the schedule
   before retrying an uncertain operation. The aggregate is a demo bottleneck.
-- Error logs contain categories only, not request bodies, phone numbers,
-  transcripts, or upstream error messages. Add privacy-reviewed observability
-  and actionable dependency monitoring before deploying.
+- Terminal logs contain structured lifecycle/error metadata, not request bodies,
+  phone numbers, transcripts, credentials, or raw upstream error messages.
+  Add privacy-reviewed centralized observability and alerting before deploying.
 - Cloud requests have short timeouts and disabled LLM/search retries to fit
   voice webhook latency, but live Twilio latency, cloud availability, and
   end-to-end staff transfers still require testing with configured accounts.

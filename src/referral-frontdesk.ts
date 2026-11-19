@@ -1,5 +1,5 @@
 import type { Reply, VoiceHandler } from "./domain.ts";
-import type { Referral } from "./referral-models.ts";
+import { normalizePatientFullName, type Patient, type Referral } from "./referral-models.ts";
 import type { ReferralStore } from "./referral-store.ts";
 
 type Session = {
@@ -43,6 +43,13 @@ function selection(speech: string, prefix: string, max: number): number | null {
   return null;
 }
 
+function fullNameFromSpeech(speech: string): string | null {
+  if (/^(availability|available|appointments?|repeat)\b|^referral\b/i.test(speech)) return null;
+  const name = speech.replace(/[.!?]+$/, "").trim()
+    .replace(/^(?:my name is|i am|i'm|full name(?: is)?|name(?: is)?|patient)\s+/i, "");
+  return normalizePatientFullName(name);
+}
+
 export class ReferralFrontdesk implements VoiceHandler {
   private store: ReferralStore;
   private now: () => number;
@@ -68,7 +75,7 @@ export class ReferralFrontdesk implements VoiceHandler {
           "This is a fictional referral availability demo. Do not share personal or medical information.",
           "You can hear available demo appointments, but booking is not enabled. Nothing will be reserved.",
           "For emergencies, hang up and call your local emergency number.",
-          "Say a demo patient number, for example patient one, or say staff.",
+          "Say a fictional patient's first and last name, a demo patient number such as patient one, or staff. Never give a real person's name.",
         ].join(" ")),
       };
       this.calls.set(callId, created);
@@ -98,28 +105,26 @@ export class ReferralFrontdesk implements VoiceHandler {
       return say("Booking and rescheduling are not enabled in this mode. Nothing was changed or reserved. Say availability or staff.");
     }
     const patientNumber = selection(speech, "patient", 100);
-    if (patientNumber !== null) {
+    const fullName = patientNumber === null ? fullNameFromSpeech(speech) : null;
+    if (patientNumber !== null || fullName !== null) {
       session.patientId = null;
       session.referralIds = [];
       session.selectedReferralId = null;
-      const id = `patient_${String(patientNumber).padStart(3, "0")}`;
-      const patient = await this.store.patient(id);
-      if (!patient) return say("That demo patient was not found. Say another patient number or staff.");
-      session.patientId = id;
-      const referrals = patient.referrals.filter(active);
-      session.referralIds = referrals.map((referral) => referral.referral_id);
-      if (!referrals.length) return say("This demo patient has no active referrals awaiting scheduling. Say another patient number or staff.");
-      if (referrals.length === 1 && referrals[0]) {
-        session.selectedReferralId = referrals[0].referral_id;
-        return this.describeAvailability(referrals[0], now);
+      let patient: Patient | null;
+      if (patientNumber !== null) {
+        patient = await this.store.patient(`patient_${String(patientNumber).padStart(3, "0")}`);
+      } else {
+        if (!fullName) throw new Error("Full-name lookup is missing its name");
+        const matches = await this.store.patientsByFullName(fullName);
+        if (matches.length > 1) {
+          return say("More than one demo patient matches that full name. Say the demo patient number, for example patient one, or staff. No patient was selected.");
+        }
+        patient = matches[0] ?? null;
       }
-      const choices = await Promise.all(referrals.map(async (referral, index) => {
-        const clinic = await this.store.clinic(referral.destination_clinic_id);
-        return `Referral ${index + 1}: ${referral.service.replaceAll("_", " ")} at ${clinic.name}, from ${referral.source_hospital}.`;
-      }));
-      return say(`${choices.join(" ")} Say referral one, referral two, or referral three as applicable.`);
+      if (!patient) return say("That demo patient was not found. Say their fictional first and last name again, a demo patient number, or staff.");
+      return this.selectPatient(session, patient, now);
     }
-    if (!session.patientId) return say("Say a demo patient number, for example patient one. Do not give a real name or date of birth.");
+    if (!session.patientId) return say("Say a demo patient number, for example patient one, or the fictional patient's first and last name. Do not give real personal information.");
     const referralNumber = selection(speech, "referral", 3);
     if (referralNumber !== null) {
       const id = session.referralIds[referralNumber - 1];
@@ -137,6 +142,22 @@ export class ReferralFrontdesk implements VoiceHandler {
       return say("That referral is no longer active or available. Say the patient number again to refresh the referral list.");
     }
     return this.describeAvailability(referral, now);
+  }
+
+  private async selectPatient(session: Session, patient: Patient, now: number): Promise<Reply> {
+    session.patientId = patient.id;
+    const referrals = patient.referrals.filter(active);
+    session.referralIds = referrals.map((referral) => referral.referral_id);
+    if (!referrals.length) return say("This demo patient has no active referrals awaiting scheduling. Say another patient number or fictional full name, or staff.");
+    if (referrals.length === 1 && referrals[0]) {
+      session.selectedReferralId = referrals[0].referral_id;
+      return this.describeAvailability(referrals[0], now);
+    }
+    const choices = await Promise.all(referrals.map(async (referral, index) => {
+      const clinic = await this.store.clinic(referral.destination_clinic_id);
+      return `Referral ${index + 1}: ${referral.service.replaceAll("_", " ")} at ${clinic.name}, from ${referral.source_hospital}.`;
+    }));
+    return say(`${choices.join(" ")} Say referral one, referral two, or referral three as applicable.`);
   }
 
   private async describeAvailability(referral: Referral, now: number): Promise<Reply> {

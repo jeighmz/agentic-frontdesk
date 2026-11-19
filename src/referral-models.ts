@@ -65,7 +65,7 @@ export const patientSchema = z.object({
   ...demoMarker,
   id: z.string().regex(/^patient_\d{3}$/),
   patient_id: z.string(),
-  first_name: z.string().startsWith("Demo "),
+  first_name: z.string().min(1).refine((value) => value.trim().length > 0, "First name must not be blank"),
   last_name: z.string().min(1),
   dob: z.iso.date(),
   phone: z.string().regex(/^\+121255501\d{2}$/),
@@ -80,3 +80,14 @@ export type Scheduling = z.infer<typeof schedulingSchema>;
 export type Referral = z.infer<typeof referralSchema>;
 export type Clinic = z.infer<typeof clinicSchema>;
 export type Patient = z.infer<typeof patientSchema>;
+
+export function normalizePatientFullName(value: string): string | null {
+  // Legacy seed data used a "Demo " marker; accept both name formats.
+  const name = value.normalize("NFC").trim().replace(/\s+/g, " ")
+    .replace(/[’‘]/g, "'").toLowerCase().replace(/^demo /, "");
+  if (name.length > 120 || !/^[\p{L}\p{M} .'-]+$/u.test(name)
+    || name.split(" ").filter((word) => /\p{L}/u.test(word)).length < 2) {
+    return null;
+  }
+  return name;
+}

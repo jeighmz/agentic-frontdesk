@@ -207,9 +207,12 @@ test("signed Twilio requests return Gather XML; unsigned and URL-tampered reques
   t.mock.method(console, "error", (...args: unknown[]) => loggedErrors.push(args));
   assert.match(await signedTurn(999, "unexpected turn"), /could not verify the result/);
   assert.equal(loggedErrors.length, 1);
-  assert.deepEqual(JSON.parse(String(loggedErrors[0]?.[0])), {
-    event: "voice_request_failed", category: "request_error",
-  });
+  const failure = JSON.parse(String(loggedErrors[0]?.[0]));
+  assert.equal(failure.event, "voice_request_failed");
+  assert.equal(failure.category, "request_error");
+  assert.equal(failure.error.type, "Error");
+  assert.equal(failure.turn, 999);
+  assert.ok(failure.requestId);
   assert.match(await signedTurn(3, "staff"), /No staff member has been contacted/);
 
   const handoffParams = { DialCallStatus: "busy" };

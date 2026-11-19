@@ -7,10 +7,10 @@ import { generateAvailability, type AppointmentSlot } from "./availability.ts";
 import { createApp } from "./app.ts";
 import { readConfig } from "./config.ts";
 import { ReferralFrontdesk } from "./referral-frontdesk.ts";
-import { readAvailableSlots, type ReferralStore } from "./referral-store.ts";
+import { readAvailableSlots, readPatientsByFullName, type ReferralStore } from "./referral-store.ts";
 import { generateClinics, generatePatients } from "./scripts/demo-data.ts";
 import { insertMissingSlots } from "./scripts/seed-availability.ts";
-import type { Patient } from "./referral-models.ts";
+import { normalizePatientFullName, type Patient } from "./referral-models.ts";
 
 const asOf = "2026-11-18T23:00:00.000Z";
 const now = Date.parse(asOf);
@@ -31,6 +31,10 @@ function fixture() {
   const records = new Map<string, Patient>([[patient.id, patient]]);
   const store: ReferralStore = {
     async patient(id) { return records.get(id) ?? null; },
+    async patientsByFullName(fullName) {
+      return [...records.values()].filter((item) =>
+        normalizePatientFullName(`${item.first_name} ${item.last_name}`) === normalizePatientFullName(fullName)).slice(0, 2);
+    },
     async clinic(id) {
       const found = clinics.find((item) => item.id === id);
       assert.ok(found);
@@ -170,6 +174,99 @@ test("voice patient lookup reads the correct referral/clinic, replays turns and 
   assert.deepEqual(patient, original);
 });
 
+test("full-name Cosmos lookup is parameterized, case-insensitive and limited to demo matches", async () => {
+  const { patient } = fixture();
+  patient.first_name = "Demo Anne-Marie";
+  patient.last_name = "O'Neil";
+  let storedPatient = patient;
+  let queries = 0;
+  const container = {
+    items: {
+      query(query: import("@azure/cosmos").SqlQuerySpec) {
+        queries += 1;
+        assert.match(query.query, /SELECT TOP 2/);
+        assert.match(query.query, /c.is_demo = true AND c.demo_dataset = @dataset/);
+        assert.match(query.query, /STRINGEQUALS/);
+        assert.doesNotMatch(query.query, /anne|neil/i);
+        assert.deepEqual(query.parameters, [
+          { name: "@dataset", value: patient.demo_dataset },
+          { name: "@fullName", value: "anne-marie o'neil" },
+          { name: "@demoFullName", value: "demo anne-marie o'neil" },
+        ]);
+        return { async fetchAll() { return { resources: [storedPatient] }; } };
+      },
+    },
+  };
+  assert.deepEqual(await readPatientsByFullName(container, "  DEMO  Anne-Marie   O’Neil  "), [patient]);
+  assert.equal(queries, 1);
+  storedPatient = { ...patient, first_name: "Anne-Marie" };
+  assert.deepEqual(await readPatientsByFullName(container, "Anne-Marie O'Neil"), [storedPatient]);
+  assert.equal(queries, 2);
+  await assert.rejects(readPatientsByFullName(container, "Anne-Marie"), /first and last name/);
+  assert.equal(queries, 2);
+  for (const invalid of [
+    { ...patient, is_demo: false },
+    { ...patient, last_name: "Different" },
+  ]) {
+    await assert.rejects(readPatientsByFullName({
+      items: { query() { return { async fetchAll() { return { resources: [invalid] }; } }; } },
+    }, "Anne-Marie O'Neil"));
+  }
+});
+
+test("full-name voice lookup accepts natural prefixes, optional Demo marker, apostrophes and hyphens", async () => {
+  const { handler, patient, clinic } = fixture();
+  patient.first_name = "Demo Anne-Marie";
+  patient.last_name = "O'Neil";
+  const phrases = [
+    "Anne-Marie O'Neil", "Demo Anne-Marie O'Neil",
+    "My name is ANNE-MARIE O’NEIL.", "patient Anne-Marie O'Neil",
+    "full name Anne-Marie O'Neil", "I am Anne-Marie O'Neil",
+  ];
+  for (const [index, speech] of phrases.entries()) {
+    const callId = `name-call-${index}`;
+    await handler.handle(callId, 0, "");
+    const result = await handler.handle(callId, 1, speech);
+    assert.match(result.reply.message, new RegExp(clinic.name));
+    assert.match(result.reply.message, /Option 1/);
+  }
+});
+
+test("ambiguous and unmatched names clear prior patient context and permit ID fallback", async () => {
+  const { handler, patient, records, queries } = fixture();
+  await handler.handle("call", 0, "");
+  await handler.handle("call", 1, patient.id);
+  const fullName = `${patient.first_name} ${patient.last_name}`;
+  records.set("patient_999", { ...structuredClone(patient), id: "patient_999", patient_id: "patient_999" });
+  const ambiguous = await handler.handle("call", 2, fullName);
+  assert.match(ambiguous.reply.message, /More than one demo patient matches/);
+  assert.doesNotMatch(ambiguous.reply.message, /Option 1|Referral 1/);
+  assert.equal(queries.length, 1);
+  assert.match((await handler.handle("call", 3, "availability")).reply.message, /Say a demo patient number/);
+  assert.match((await handler.handle("call", 4, patient.id)).reply.message, /Option 1/);
+  const missing = await handler.handle("call", 5, "My name is Fictional Missingperson");
+  assert.match(missing.reply.message, /not found/);
+  assert.match((await handler.handle("call", 6, "availability")).reply.message, /Say a demo patient number/);
+  assert.equal(queries.length, 2);
+});
+
+test("a first name alone cannot select a patient and name lookup retains referral choice behavior", async (t) => {
+  const { handler, patient, store, referral } = fixture();
+  const lookup = t.mock.method(store, "patientsByFullName");
+  await handler.handle("call", 0, "");
+  assert.match((await handler.handle("call", 1, "Anne")).reply.message, /first and last name/);
+  assert.equal(lookup.mock.callCount(), 0);
+  patient.referrals.push({
+    ...structuredClone(referral), referral_id: "ref_9001", source_hospital: "Demo Other Hospital",
+  });
+  const choices = await handler.handle("call", 2, `${patient.first_name} ${patient.last_name}`);
+  assert.match(choices.reply.message, /Referral 1:/);
+  assert.match(choices.reply.message, /Referral 2:/);
+  assert.doesNotMatch(choices.reply.message, /Option 1/);
+  const availability = await handler.handle("call", 3, "referral two");
+  assert.match(availability.reply.message, /from Demo Other Hospital/);
+});
+
 test("multiple active referrals require an explicit choice and terminal referrals are excluded", async () => {
   const { patient, referral, handler, records, queries } = fixture();
   patient.referrals = [
@@ -241,7 +338,11 @@ test("referral mode accepts Cosmos-only configuration and works through signed T
     return result.text();
   };
   assert.match(await post(0, ""), /fictional referral availability demo/);
-  assert.match(await post(1, patient.id), /Option 1/);
+  const infos: string[] = [];
+  t.mock.method(console, "log", (entry: string) => infos.push(entry));
+  assert.match(await post(1, `My name is ${patient.first_name} ${patient.last_name}`), /Option 1/);
+  assert.ok(!infos.join().includes(patient.first_name));
+  assert.ok(!infos.join().includes(patient.last_name));
   assert.match(await post(2, "yes"), /Nothing was changed or reserved/);
   const logs: unknown[][] = [];
   t.mock.method(console, "error", (...args: unknown[]) => logs.push(args));
