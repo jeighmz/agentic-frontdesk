@@ -11,7 +11,9 @@ type Event =
   | "voice_request_started" | "voice_request_completed" | "voice_request_aborted" | "voice_request_slow"
   | "voice_request_rejected" | "voice_turn_received" | "voice_request_failed"
   | "dependency_operation_started" | "dependency_operation_completed" | "dependency_operation_failed"
-  | "llm_request_blocked";
+  | "llm_request_blocked"
+  | "relay_call_rejected" | "relay_session_started" | "relay_session_ended"
+  | "relay_session_failed" | "relay_input_rejected";
 type Details = {
   operation?: Operation;
   mode?: "demo" | "cloud" | "referrals";
@@ -21,7 +23,8 @@ type Details = {
   durationMs?: number;
   speechPresent?: boolean;
   category?: "state_conflict" | "request_error";
-  reason?: "invalid_signature" | "invalid_payload";
+  reason?: "invalid_signature" | "invalid_payload" | "capacity" | "busy"
+    | "duration_limit" | "setup_timeout" | "transport_closed" | "ended" | "provider_error";
   limit?: "process" | "rate" | "concurrency";
   requestsUsed?: number;
   requestsRemaining?: number;
@@ -52,7 +55,7 @@ const schemaFields = new Set([
 const statusHints: Record<number, string> = {
   400: "Check the dependency request, query/schema, model support, and resource configuration.",
   401: "Check Azure login and which identity DefaultAzureCredential selected.",
-  403: "Check service data-plane RBAC permissions and network/firewall access.",
+  403: "Check service credentials, permissions/RBAC, and network/firewall access.",
   404: "Check the configured resource, deployment, database, container, and referenced demo records.",
   408: "The dependency timed out; inspect request duration and network connectivity.",
   429: "Dependency quota was exceeded; check Cosmos request units or Azure OpenAI token/rate limits.",
@@ -62,7 +65,8 @@ export function errorDetails(error: unknown) {
   const record = typeof error === "object" && error !== null ? error : {};
   const code = "code" in record ? record.code : undefined;
   const status = "statusCode" in record ? record.statusCode : "status" in record ? record.status : undefined;
-  const numericStatus = typeof code === "number" ? code : typeof status === "number" ? status : undefined;
+  const numericStatus = typeof code === "number" && code >= 100 && code <= 599
+    ? code : typeof status === "number" ? status : undefined;
   const statusCode = numericStatus !== undefined && Number.isInteger(numericStatus)
     && numericStatus >= 100 && numericStatus <= 599 ? numericStatus : undefined;
   const substatus = "substatus" in record ? record.substatus : undefined;

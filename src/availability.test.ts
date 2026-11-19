@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { createServer } from "node:http";
 import { test } from "node:test";
 import twilio from "twilio";
+import { WebSocket } from "ws";
 import { Temporal } from "@js-temporal/polyfill";
 import {
   availabilityWindows, generateAvailability, type AppointmentSlot, type AvailabilityWindow,
@@ -10,6 +12,7 @@ import { createApp } from "./app.ts";
 import { bookReferral, type BookingRequest } from "./booking.ts";
 import { readConfig } from "./config.ts";
 import { ReferralFrontdesk } from "./referral-frontdesk.ts";
+import { ConversationRelay } from "./conversation-relay.ts";
 import { readAvailableSlots, readPatientsByFullName, type ReferralStore } from "./referral-store.ts";
 import { generateClinics, generatePatients } from "./scripts/demo-data.ts";
 import { insertMissingSlots } from "./scripts/seed-availability.ts";
@@ -761,4 +764,75 @@ test("referral mode accepts Cosmos-only configuration and works through signed T
   assert.ok(!infos.join().includes(patient.id));
   assert.ok(!infos.join().includes(patient.first_name));
   assert.ok(!infos.join().includes(patient.last_name));
+});
+
+test("realtime referral booking retains natural confirmation, one write and the post-booking goodbye", { timeout: 5000 }, async (t) => {
+  for (const method of ["log", "warn", "error"] as const) t.mock.method(console, method, () => {});
+  const config = readConfig({
+    MODE: "referrals", VOICE_TRANSPORT: "relay", COSMOS_ENDPOINT: "https://cosmos.example.com",
+    PUBLIC_BASE_URL: "https://voice.example.com", TWILIO_AUTH_TOKEN: "synthetic-token",
+  });
+  const f = fixture({ async interpret() { return { action: "confirm_booking" }; } });
+  const booking = t.mock.method(f.store, "book");
+  const relay = new ConversationRelay(config, f.handler, async () => {});
+  const server = createServer(createApp(config, f.handler, relay));
+  relay.attach(server);
+  server.listen(0, "127.0.0.1");
+  t.after(() => new Promise<void>((resolve, reject) => {
+    relay.close();
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const id = `CA${"f".repeat(32)}`;
+  async function post(path: string) {
+    const body = { CallSid: id };
+    const response = await fetch(`${origin}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": twilio.getExpectedTwilioSignature(
+          config.TWILIO_AUTH_TOKEN, `${config.PUBLIC_BASE_URL}${path}`, body,
+        ),
+      },
+      body: new URLSearchParams(body),
+    });
+    assert.equal(response.status, 200);
+    return response.text();
+  }
+  const xml = await post("/voice");
+  const socketUrl = xml.match(/url="([^"]+)"/)?.[1];
+  const actionUrl = xml.match(/action="([^"]+)"/)?.[1];
+  assert.ok(socketUrl && actionUrl);
+  const path = new URL(socketUrl);
+  const socket = new WebSocket(`${origin.replace(/^http:/, "ws:")}${path.pathname}${path.search}`, {
+    headers: {
+      "x-twilio-signature": twilio.getExpectedTwilioSignature(config.TWILIO_AUTH_TOKEN, socketUrl, {}),
+    },
+  });
+  await once(socket, "open");
+  async function exchange(message: object) {
+    const reply = once(socket, "message");
+    socket.send(JSON.stringify(message));
+    const [data] = await reply;
+    return JSON.parse(String(data));
+  }
+  await exchange({ type: "setup", callSid: id, accountSid: `AC${"f".repeat(32)}` });
+  const say = (voicePrompt: string) => exchange({ type: "prompt", voicePrompt, last: true });
+  assert.match((await say(f.patient.id)).token, /Option 1/);
+  assert.match((await say("book option one")).token, /Say yes to confirm/);
+  assert.equal(booking.mock.callCount(), 0);
+  socket.send(JSON.stringify({ type: "interrupt" }));
+  assert.match((await say("Sounds good, please book it")).token, /Your demo appointment is booked.*anything else/);
+  assert.equal(booking.mock.callCount(), 1);
+  assert.equal(f.records.get(f.patient.id)?.referrals[0]?.status, "scheduled");
+  assert.equal((await say("No, thank you")).type, "end");
+  const callback = new URL(actionUrl);
+  const farewell = await post(`${callback.pathname}${callback.search}`);
+  assert.match(farewell, /Thank you for calling.*Goodbye/);
+  assert.match(farewell, /<Hangup\s*\/>/);
+  assert.doesNotMatch(farewell, /<Gather/);
+  assert.equal(booking.mock.callCount(), 1);
 });

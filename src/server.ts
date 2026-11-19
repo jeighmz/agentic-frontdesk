@@ -1,4 +1,6 @@
 import { createApp } from "./app.ts";
+import { createServer } from "node:http";
+import { ConversationRelay, RELAY_LIMITS } from "./conversation-relay.ts";
 import { AzurePlanner, CosmosStore, DemoKnowledge, DemoPlanner, ElasticKnowledge, MemoryStore } from "./adapters.ts";
 import { readConfig } from "./config.ts";
 import { Frontdesk } from "./frontdesk.ts";
@@ -37,14 +39,20 @@ async function initialize(config: Config): Promise<{ frontdesk: VoiceHandler; cl
 
 const config = readConfig(process.env);
 const services = await initialize(config);
-const server = createApp(config, services.frontdesk).listen(config.PORT, () => {
+const relay = config.VOICE_TRANSPORT === "relay" ? new ConversationRelay(config, services.frontdesk) : undefined;
+const server = createServer(createApp(config, services.frontdesk, relay));
+relay?.attach(server);
+server.listen(config.PORT, () => {
   console.log(JSON.stringify({
     event: "listening", port: config.PORT, mode: config.MODE, syntheticDataOnly: true,
     referralAIEnabled: config.MODE === "referrals" && config.referrals.REFERRAL_AI_ENABLED,
+    voiceTransport: config.VOICE_TRANSPORT,
+    ...(relay ? { relayLimits: RELAY_LIMITS } : {}),
   }));
 });
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
+    relay?.close();
     server.close((error) => {
       if (error) {
         console.error(JSON.stringify({ event: "shutdown_failed" }));

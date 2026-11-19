@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { StateConflict, type Reply, type VoiceHandler } from "./domain.ts";
 import { errorDetails, log, requestContext } from "./logging.ts";
-import { ModelUsageLimitError } from "./model-guard.ts";
+import { RELAY_LIMITS, type ConversationRelay } from "./conversation-relay.ts";
+import { voiceFailureReply } from "./voice-replies.ts";
 
 const webhookSchema = z.object({
   CallSid: z.string().regex(/^CA[0-9a-f]{32}$/i),
@@ -15,16 +16,20 @@ const turnSchema = z.string().regex(/^\d{1,3}$/).transform(Number);
 
 function voiceXml(config: Config, response: Reply, callTurn: number): string {
   const voice = new twilio.twiml.VoiceResponse();
+  const sayOptions = config.VOICE_TRANSPORT === "relay" ? { voice: "Google.en-US-Neural2-F" as const } : {};
   if (response.transfer) {
-    voice.say(response.message);
+    voice.say(sayOptions, response.message);
     if (config.STAFF_PHONE_NUMBER) {
-      voice.dial({ timeout: 20, action: `${config.PUBLIC_BASE_URL}/voice/handoff`, method: "POST" }, config.STAFF_PHONE_NUMBER);
+      voice.dial({
+        timeout: 20, action: `${config.PUBLIC_BASE_URL}/voice/handoff`, method: "POST",
+        ...(config.VOICE_TRANSPORT === "relay" ? { timeLimit: RELAY_LIMITS.maxCallSeconds } : {}),
+      }, config.STAFF_PHONE_NUMBER);
     } else {
-      voice.say("Staff transfer is not configured for this demo. No staff member has been contacted. Goodbye.");
+      voice.say(sayOptions, "Staff transfer is not configured for this demo. No staff member has been contacted. Goodbye.");
       voice.hangup();
     }
   } else if (response.end) {
-    voice.say(response.message);
+    voice.say(sayOptions, response.message);
     voice.hangup();
   } else {
     const gather = voice.gather({
@@ -41,11 +46,12 @@ function voiceXml(config: Config, response: Reply, callTurn: number): string {
   return voice.toString();
 }
 
-export function createApp(config: Config, frontdesk: VoiceHandler) {
+export function createApp(config: Config, frontdesk: VoiceHandler, relay?: ConversationRelay) {
+  if (config.VOICE_TRANSPORT === "relay" && !relay) throw new Error("ConversationRelay transport must be attached");
   const app = express();
   app.disable("x-powered-by");
   app.get("/healthz", (_request, response) => {
-    response.json({ status: "ok", mode: config.MODE, syntheticDataOnly: true });
+    response.json({ status: "ok", mode: config.MODE, syntheticDataOnly: true, voiceTransport: config.VOICE_TRANSPORT });
   });
   app.use("/voice", (request, response, next) => {
     const context = { requestId: randomUUID() };
@@ -99,12 +105,31 @@ export function createApp(config: Config, frontdesk: VoiceHandler) {
     const context = requestContext.getStore();
     if (context) context.turn = turn.data;
     log("info", "voice_turn_received", { speechPresent: Boolean(body.data.SpeechResult?.trim()) });
+    if (config.VOICE_TRANSPORT === "relay" && relay) {
+      if (turn.data !== 0 || body.data.SpeechResult !== undefined) {
+        log("warn", "voice_request_rejected", { reason: "invalid_payload", statusCode: 400 });
+        response.status(400).send("Relay calls must start at turn zero");
+        return;
+      }
+      response.type("text/xml").send(relay.start(body.data.CallSid));
+      return;
+    }
     const result = await frontdesk.handle(body.data.CallSid, turn.data, body.data.SpeechResult ?? "");
     response.type("text/xml").send(voiceXml(config, result.reply, result.turn));
   });
+  app.post("/voice/relay-ended", (request, response) => {
+    const body = webhookSchema.safeParse(request.body);
+    const ticket = z.uuid().safeParse(request.query.ticket);
+    if (!relay || !body.success || !ticket.success) {
+      log("warn", "voice_request_rejected", { reason: "invalid_payload", statusCode: 400 });
+      response.status(400).send("Invalid relay callback");
+      return;
+    }
+    response.type("text/xml").send(voiceXml(config, relay.finish(body.data.CallSid, ticket.data), 0));
+  });
   app.post("/voice/handoff", (request, response) => {
     const voice = new twilio.twiml.VoiceResponse();
-    voice.say(request.body?.DialCallStatus === "completed"
+    voice.say(config.VOICE_TRANSPORT === "relay" ? { voice: "Google.en-US-Neural2-F" } : {}, request.body?.DialCallStatus === "completed"
       ? "The staff call has ended. Goodbye."
       : "I could not complete the staff transfer. Please contact the hospital directly. For an emergency, call your local emergency number.");
     voice.hangup();
@@ -115,13 +140,7 @@ export function createApp(config: Config, frontdesk: VoiceHandler) {
       category: error instanceof StateConflict ? "state_conflict" : "request_error",
       error: errorDetails(error),
     });
-    response.status(200).type("text/xml").send(voiceXml(config, {
-      message: error instanceof ModelUsageLimitError
-        ? "The demo AI request limit was reached or the AI is busy. No new AI request was sent. Please contact staff for help."
-        : "I could not verify the result of that request. Please ask staff to check the schedule before trying again.",
-      transfer: true,
-      end: false,
-    }, 0));
+    response.status(200).type("text/xml").send(voiceXml(config, voiceFailureReply(error), 0));
   });
   return app;
 }

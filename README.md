@@ -91,7 +91,7 @@ requiring a Cloudflare account or your own domain.
    curl https://random-words.trycloudflare.com/healthz
    ```
 
-   Expect `{"status":"ok","mode":"demo","syntheticDataOnly":true}`.
+   Expect `{"status":"ok","mode":"demo","syntheticDataOnly":true,"voiceTransport":"gather"}`.
 
 5. In **Twilio Console → Phone Numbers → Manage → Active numbers**, select
    your Voice-capable number. Under **Voice configuration**, set
@@ -521,6 +521,74 @@ do not stop requests, reset periodically, and use delayed cost data (typically
 8–24 hours). They are not a prepaid "$20 until refilled" balance. No automatic
 spending cutoff or application budget wallet is implemented.
 
+### Real-time voice with ElevenLabs
+
+The optional `relay` transport uses Twilio ConversationRelay for real-time speech
+recognition, ElevenLabs for a warm female US-English voice, and the same front-desk
+handler and Azure intent interpreter as before. No new Azure audio model or
+ElevenLabs API key is required. Twilio bills ConversationRelay/voice separately
+from Azure model tokens; check your account's rates before testing.
+
+1. In Twilio Console, open **Voice → Settings → Privacy & Security** (or
+   **Settings → General** in the legacy console). Read and accept the
+   **Predictive and Generative AI/ML Features Addendum**, then save. This legal
+   acceptance must be completed by the account owner, not by this app.
+2. Keep the existing phone-number **POST** webhook pointing to
+   `https://your-public-host/voice`. Your HTTPS tunnel must also support WebSocket
+   upgrades; Cloudflare Tunnel does. The app derives its `wss://` URL from
+   `PUBLIC_BASE_URL`; no second port is needed.
+3. Set these values in `.env`, keeping your existing referral/Azure settings:
+
+   ```dotenv
+   VOICE_TRANSPORT=relay
+   ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+   ```
+
+   The default is Rachel, using ElevenLabs v4. You can substitute an available
+   20-character voice ID from the
+   [Twilio voice picker](https://www.twilio.com/docs/voice/conversationrelay/voice-configuration).
+   Do not include an `ElevenLabs.` prefix or model suffix in the environment value.
+4. Restart `npm run dev`. `/healthz` should report `"voiceTransport":"relay"`.
+   Call the existing Twilio number to test the voice; neither the phone webhook
+   nor the Azure deployment needs changing.
+
+**Hard development limits:**
+
+- **One active real-time session per app process**, reserved before issuing
+  `<Connect>`. Additional calls hear a busy message and hang up, rather than
+  starting another paid ConversationRelay session.
+- **Five minutes per call.** The app sets Twilio's call `timeLimit` to 300 seconds
+  before running the front-desk handler, and independently ends the relay at five
+  minutes from admission. If setting the Twilio limit fails, the session ends
+  without starting the handler. Twilio's limit remains in effect if the server
+  stalls or crashes. A setup that doesn't complete within 15 seconds also ends.
+- No automatic reconnect, unbounded message queue, or automatic model retry.
+  Incoming messages are capped at 8 KB each and 100 per session; only final
+  transcriptions of up to 2,000 characters reach the handler.
+- Existing **100 model requests per process / 10 per minute / one in flight**
+  guards still apply. Interruptions stop speech playback, not booking writes.
+  Speech received while a request is being checked is explicitly rejected with
+  a repeat-after-response prompt, never queued into a later confirmation.
+- Final goodbyes, errors, busy responses and staff handoffs use a Google female
+  neural `<Say>` fallback outside the relay. This lets Twilio finish speaking
+  before hanging up/transferring, instead of cutting off the last ElevenLabs
+  utterance. Staff dial attempts are also bounded to five minutes.
+
+These are **process-local/per-call limits, not a spending wallet**. Restarting
+or running more app processes allows more calls; repeated short calls still incur
+telephony charges. The limits don't prevent costly Azure provisioning. Set
+`VOICE_TRANSPORT=gather` and restart to restore the original voice flow. Relay
+failures end with an explicit error/handoff; they never silently restart the
+conversation or claim an uncertain booking failed or succeeded.
+
+Only use synthetic data. Relay speech/text passes through Twilio, ElevenLabs and
+the configured transcription provider (Deepgram). Recordings and conversation
+intelligence aren't enabled by this implementation. Do not send real patient
+information without a separate compliance and vendor-agreement review.
+
+References: [Twilio onboarding](https://www.twilio.com/docs/voice/conversationrelay/onboarding),
+[WebSocket protocol](https://www.twilio.com/docs/voice/conversationrelay/websocket-messages).
+
 ### Terminal diagnostics
 
 Restart `npm run dev` after code changes; it does not automatically reload.
@@ -547,6 +615,11 @@ Voice requests now print structured JSON logs to the app terminal:
 - `llm_request_blocked`: the local `process`, `rate`, or `concurrency` guard
   rejected a model request, including requests used/remaining for this process.
   No transcript or patient details are logged.
+- `relay_session_started` / `relay_session_ended` / `relay_session_failed`:
+  real-time voice lifecycle with safe reasons/errors. `relay_call_rejected`
+  identifies rejected admission/handshakes; `relay_input_rejected` identifies
+  overlapping speech that must be repeated. No caller identifiers, transcripts,
+  ticket URLs, or provider error messages are logged.
 - `voice_request_slow`: no response after 8 seconds; this is a warning, not a
   change to request timeouts. `voice_request_aborted` means the connection closed
   before a response finished.
