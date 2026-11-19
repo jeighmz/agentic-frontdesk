@@ -374,8 +374,14 @@ continues to work as before.
   and updates the selected patient's referral to `scheduled`, with its appointment
   time and scheduling status. Booked slots disappear from subsequent availability.
   If another caller took the slot or it expired, say **"availability"** to refresh.
+- After a successful booking, the bot asks **"Is there anything else I can help
+  you with?"** Say **"no"**, **"no thank you"**, or **"that's all"** for a friendly
+  goodbye and hangup. Say **"yes"** to continue with another referral lookup, or
+  give the next fictional patient name/number directly. These follow-up yes/no
+  answers do not trigger another booking or model request.
 - Rescheduling and cancellation of an existing appointment are not implemented.
-  Saying **"no"** only discards an unsubmitted proposal; it never cancels a booking.
+  Before confirmation, **"no"** discards the unsubmitted proposal; after booking,
+  it declines further help. Neither response cancels a booked appointment.
 
 The voice service and seeders require **Cosmos DB Built-in Data Contributor**
 data-plane access to this database, using `DefaultAzureCredential` as above.

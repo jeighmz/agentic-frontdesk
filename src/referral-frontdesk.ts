@@ -15,6 +15,7 @@ type Session = {
   selectedReferralId: string | null;
   offered: { referralId: string; clinicName: string; slots: AppointmentSlot[] } | null;
   pending: PendingBooking | null;
+  awaitingMoreHelp: boolean;
   preference: AvailabilityPreference;
   reply: Reply;
   updatedAt: number;
@@ -23,6 +24,8 @@ type Session = {
 function say(message: string, transfer = false, end = false): Reply {
   return { message, transfer, end };
 }
+
+const moreHelpPrompt = "Is there anything else I can help you with? Say yes or no.";
 
 const smallNumbers = [
   "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -92,7 +95,8 @@ export class ReferralFrontdesk implements VoiceHandler {
       if (this.calls.size >= 100) return { reply: say("The demo is at capacity. Please call again later.", false, true), turn };
       const created: Session = {
         turn: 1, patientId: null, referralIds: [], selectedReferralId: null,
-        offered: null, pending: null, preference: { date: null, period: null }, updatedAt: now,
+        offered: null, pending: null, awaitingMoreHelp: false,
+        preference: { date: null, period: null }, updatedAt: now,
         reply: say([
           "This is a fictional referral scheduling demo. Do not share personal or medical information.",
           "You can book a demo appointment after choosing a time and confirming. These are not real appointments.",
@@ -144,6 +148,22 @@ export class ReferralFrontdesk implements VoiceHandler {
         return say("The proposed booking was discarded. No appointment was booked. Say availability to refresh or choose another offered option.");
       }
       return say(this.confirmation(session.pending));
+    }
+    if (session.awaitingMoreHelp) {
+      const answer = speech.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[.!?,]/g, "")
+        .replace(/\b(?:thank you|thanks)\b/g, "").trim().replace(/\s+/g, " ");
+      if ([
+        "no", "no that's all", "no that is all", "that's all", "that is all", "nothing else",
+        "i'm all set", "i am all set", "all set", "goodbye", "bye", "bye bye",
+      ].includes(answer)) {
+        session.awaitingMoreHelp = false;
+        return say("Thank you for calling the demo front desk. Have a wonderful day. Goodbye!", false, true);
+      }
+      if (["yes", "yes please"].includes(answer)) {
+        session.awaitingMoreHelp = false;
+        return say("Of course. Say a demo patient number or fictional full name to check other referrals, or say staff.");
+      }
+      if (!answer || answer === "maybe") return say(moreHelpPrompt);
     }
     if (/^(yes|yes please|confirm)[.!?]*$/i.test(speech)) {
       return say("There is no appointment awaiting confirmation. Choose an offered option first, for example book option one.");
@@ -231,6 +251,7 @@ export class ReferralFrontdesk implements VoiceHandler {
       session.selectedReferralId = null;
       session.offered = null;
       session.pending = null;
+      session.awaitingMoreHelp = false;
       session.preference = { date: null, period: null };
       let patient: Patient | null;
       if (patientNumber !== null) {
@@ -332,10 +353,12 @@ export class ReferralFrontdesk implements VoiceHandler {
   private bookingReply(session: Session, result: BookingResult): Reply {
     session.pending = null;
     session.offered = null;
+    session.awaitingMoreHelp = false;
     if (result.status === "booked") {
       session.selectedReferralId = null;
       session.referralIds = [];
-      return say(`Your demo appointment is booked at ${result.clinicName} on ${this.describeSlot(result.slot)}, for 30 minutes. This is not a real appointment. Say your patient number or fictional full name again to check other referrals, or staff.`);
+      session.awaitingMoreHelp = true;
+      return say(`Your demo appointment is booked at ${result.clinicName} on ${this.describeSlot(result.slot)}, for 30 minutes. This is not a real appointment. ${moreHelpPrompt}`);
     }
     if (result.status === "slot_unavailable") {
       return say("That slot is no longer available. No appointment was booked. Say availability to choose another time.");

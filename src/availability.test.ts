@@ -351,12 +351,57 @@ test("simultaneous voice confirmations and webhook replays submit one booking re
     handler.handle("call", 3, "yes"), handler.handle("call", 3, "yes"),
   ]);
   assert.match(first.reply.message, /Your demo appointment is booked/);
+  assert.match(first.reply.message, /Is there anything else I can help you with/);
+  assert.equal(first.reply.end, false);
   assert.deepEqual(duplicate, first);
   assert.deepEqual(await handler.handle("call", 3, "yes"), first);
   assert.equal(booking.mock.callCount(), 1);
   assert.equal(slots.filter((slot) => slot.status === "booked").length, 1);
   assert.equal(records.get(patient.id)?.referrals[0]?.status, "scheduled");
   assert.match((await handler.handle("call", 4, patient.id)).reply.message, /no active referrals/);
+});
+
+test("declining further help closes the call without another booking or model request", async (t) => {
+  t.mock.method(console, "log", () => {});
+  for (const speech of ["No.", "No, thank you.", "No thanks, that's all.", "That’s all.", "Nothing else", "Goodbye"]) {
+    const { handler, patient, store } = fixture({
+      async interpret() { throw new Error("Closing should not call the model"); },
+    });
+    const booking = t.mock.method(store, "book");
+    await handler.handle("call", 0, "");
+    await handler.handle("call", 1, patient.id);
+    await handler.handle("call", 2, "book option one");
+    await handler.handle("call", 3, "yes");
+    const closing = await handler.handle("call", 4, speech);
+    assert.match(closing.reply.message, /Thank you for calling.*Goodbye/);
+    assert.equal(closing.reply.end, true);
+    assert.equal(closing.reply.transfer, false);
+    assert.deepEqual(await handler.handle("call", 4, speech), closing);
+    assert.deepEqual(await handler.handle("call", 5, "yes"), closing);
+    assert.equal(booking.mock.callCount(), 1);
+  }
+});
+
+test("accepting further help continues the call, while unclear answers repeat the closing question", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const { handler, patient, store } = fixture({
+    async interpret() { throw new Error("Follow-up answers should not call the model"); },
+  });
+  const booking = t.mock.method(store, "book");
+  await handler.handle("call", 0, "");
+  await handler.handle("call", 1, patient.id);
+  await handler.handle("call", 2, "book option one");
+  await handler.handle("call", 3, "yes");
+  for (const [index, speech] of ["", "Thank you.", "Maybe"].entries()) {
+    const repeated = await handler.handle("call", index + 4, speech);
+    assert.match(repeated.reply.message, /Is there anything else I can help you with/);
+    assert.equal(repeated.reply.end, false);
+  }
+  const continued = await handler.handle("call", 7, "Yes, please.");
+  assert.match(continued.reply.message, /Say a demo patient number/);
+  assert.equal(continued.reply.end, false);
+  assert.equal(booking.mock.callCount(), 1);
+  assert.match((await handler.handle("call", 8, patient.id)).reply.message, /no active referrals/);
 });
 
 test("a taken slot is rejected at confirmation and availability can be refreshed", async (t) => {
@@ -403,6 +448,7 @@ test("uncertain confirmations retain the request and do not claim that no bookin
   await assert.rejects(handler.handle("call", 3, "yes"), /Unknown write outcome/);
   const decline = await handler.handle("call", 3, "no");
   assert.match(decline.reply.message, /may already have booked/);
+  assert.equal(decline.reply.end, false);
   assert.doesNotMatch(decline.reply.message, /No appointment was booked|discarded/);
   await assert.rejects(handler.handle("call", 4, "yes"), /Unknown write outcome/);
   assert.equal(requests.length, 2);
@@ -609,6 +655,11 @@ test("referral mode accepts Cosmos-only configuration and works through signed T
   const booked = await post(4, "yes");
   assert.match(booked, /Your demo appointment is booked/);
   assert.equal(await post(4, "yes"), booked);
+  const closed = await post(5, "No, thank you.");
+  assert.match(closed, /Thank you for calling.*Goodbye/);
+  assert.match(closed, /<Hangup\s*\/>/);
+  assert.doesNotMatch(closed, /<Gather/);
+  assert.equal(await post(5, "No, thank you."), closed);
   assert.ok(infos.join().includes("cosmos.booking.finalize"));
   assert.ok(!infos.join().includes(patient.id));
   assert.ok(!infos.join().includes(patient.first_name));
