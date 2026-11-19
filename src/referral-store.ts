@@ -1,7 +1,10 @@
 import { CosmosClient, type Container, type SqlQuerySpec } from "@azure/cosmos";
 import { DefaultAzureCredential } from "@azure/identity";
 import { observeOperation } from "./logging.ts";
-import { AVAILABILITY_DATASET, slotSchema, type AppointmentSlot } from "./availability.ts";
+import { bookReferral, type BookingRequest, type BookingResult } from "./booking.ts";
+import {
+  AVAILABILITY_DATASET, availabilityWindowsSchema, slotSchema, type AppointmentSlot, type AvailabilityWindow,
+} from "./availability.ts";
 import {
   CLINICS_CONTAINER, DATASET, PATIENTS_CONTAINER, REFERRALS_DATABASE, SLOTS_CONTAINER,
   clinicSchema, normalizePatientFullName, patientSchema, type Clinic, type Patient, type Service,
@@ -11,7 +14,8 @@ export interface ReferralStore {
   patient(id: string): Promise<Patient | null>;
   patientsByFullName(fullName: string): Promise<Patient[]>;
   clinic(id: string): Promise<Clinic>;
-  availability(clinicId: string, service: Service, now: number): Promise<AppointmentSlot[]>;
+  availability(clinicId: string, service: Service, now: number, windows?: AvailabilityWindow[]): Promise<AppointmentSlot[]>;
+  book(request: BookingRequest): Promise<BookingResult>;
 }
 
 type PatientNameReader = {
@@ -42,15 +46,22 @@ export async function readPatientsByFullName(container: PatientNameReader, fullN
   });
 }
 
-export function availabilityQuery(service: Service, now: number): SqlQuerySpec {
+export function availabilityQuery(service: Service, now: number, windows: AvailabilityWindow[] = []): SqlQuerySpec {
+  availabilityWindowsSchema.parse(windows);
+  const filter = windows.length
+    ? ` AND (${windows.map((_, index) => `(c.starts_at >= @start${index} AND c.starts_at < @end${index})`).join(" OR ")})`
+    : "";
   return {
     query: `SELECT TOP 3 * FROM c WHERE c.is_demo = true AND c.demo_dataset = @dataset
-      AND c.service = @service AND c.status = "available" AND c.starts_at > @now
+      AND c.service = @service AND c.status = "available" AND c.starts_at > @now${filter}
       ORDER BY c.starts_at ASC`,
     parameters: [
       { name: "@dataset", value: AVAILABILITY_DATASET },
       { name: "@service", value: service },
       { name: "@now", value: new Date(now).toISOString() },
+      ...windows.flatMap((window, index) => [
+        { name: `@start${index}`, value: window.start }, { name: `@end${index}`, value: window.end },
+      ]),
     ],
   };
 }
@@ -71,15 +82,17 @@ type SlotReader = {
 };
 
 export async function readAvailableSlots(
-  container: SlotReader, clinicId: string, service: Service, now: number,
+  container: SlotReader, clinicId: string, service: Service, now: number, windows: AvailabilityWindow[] = [],
 ): Promise<AppointmentSlot[]> {
-  const result = await container.items.query(availabilityQuery(service, now), {
+  const result = await container.items.query(availabilityQuery(service, now, windows), {
     partitionKey: clinicId,
   }).fetchAll();
   return result.resources.map((document) => {
     const slot = slotSchema.parse(document);
     if (slot.clinic_id !== clinicId || slot.service !== service || slot.status !== "available"
-      || Date.parse(slot.starts_at) <= now) {
+      || Date.parse(slot.starts_at) <= now
+      || (windows.length > 0 && !windows.some((window) => Date.parse(slot.starts_at) >= Date.parse(window.start)
+        && Date.parse(slot.starts_at) < Date.parse(window.end)))) {
       throw new Error("Cosmos returned a slot inconsistent with the availability request");
     }
     return slot;
@@ -131,8 +144,14 @@ export class CosmosReferralStore implements ReferralStore {
     });
   }
 
-  async availability(clinicId: string, service: Service, now: number): Promise<AppointmentSlot[]> {
-    return observeOperation("cosmos.slots.query", () => readAvailableSlots(this.slots, clinicId, service, now));
+  async availability(clinicId: string, service: Service, now: number, windows: AvailabilityWindow[] = []): Promise<AppointmentSlot[]> {
+    return observeOperation("cosmos.slots.query", () => readAvailableSlots(this.slots, clinicId, service, now, windows));
+  }
+
+  async book(request: BookingRequest): Promise<BookingResult> {
+    return observeOperation("cosmos.referral.book", () => bookReferral({
+      patients: this.patients, clinics: this.clinics, slots: this.slots,
+    }, request));
   }
 
   close() {

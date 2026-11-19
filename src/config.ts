@@ -24,7 +24,14 @@ const shared = z.object({
   }, "Invalid IANA time zone"),
 });
 
-const cloud = z.object({
+const azureOpenAI = z.object({
+  AZURE_OPENAI_ENDPOINT: httpsUrl,
+  AZURE_OPENAI_DEPLOYMENT: z.string().min(1),
+  AZURE_OPENAI_API_VERSION: z.string().min(1),
+});
+export type AzureOpenAIConfig = z.infer<typeof azureOpenAI>;
+
+const cloud = azureOpenAI.extend({
   COSMOS_ENDPOINT: httpsUrl,
   COSMOS_KEY: z.string().min(1),
   COSMOS_DATABASE: z.string().min(1),
@@ -32,18 +39,24 @@ const cloud = z.object({
   ELASTICSEARCH_URL: httpsUrl,
   ELASTICSEARCH_API_KEY: z.string().min(1),
   ELASTICSEARCH_INDEX: z.string().min(1),
-  AZURE_OPENAI_ENDPOINT: httpsUrl,
   AZURE_OPENAI_API_KEY: z.string().min(1),
-  AZURE_OPENAI_DEPLOYMENT: z.string().min(1),
-  AZURE_OPENAI_API_VERSION: z.string().min(1),
 });
 
 export function readConfig(env: NodeJS.ProcessEnv) {
   const base = shared.parse(env);
   if (base.MODE === "referrals") {
+    const referrals = z.object({
+      COSMOS_ENDPOINT: httpsUrl,
+      REFERRAL_AI_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
+    }).parse(env);
     return {
       ...base, MODE: "referrals" as const,
-      referrals: z.object({ COSMOS_ENDPOINT: httpsUrl }).parse(env),
+      referrals: {
+        ...referrals,
+        openai: referrals.REFERRAL_AI_ENABLED ? azureOpenAI.extend({
+          AZURE_OPENAI_API_VERSION: z.string().min(1).default("2024-10-21"),
+        }).parse(env) : null,
+      },
     };
   }
   return base.MODE === "cloud"

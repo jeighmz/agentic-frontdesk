@@ -4,7 +4,9 @@ import { StateConflict } from "./domain.ts";
 
 export const requestContext = new AsyncLocalStorage<{ requestId: string; turn?: number }>();
 type Operation = "cosmos.containers.check" | "cosmos.patient.read" | "cosmos.patient.name_query"
-  | "cosmos.clinic.read" | "cosmos.slots.query";
+  | "cosmos.clinic.read" | "cosmos.slots.query" | "cosmos.referral.book"
+  | "cosmos.booking.intent" | "cosmos.booking.slot" | "cosmos.booking.finalize" | "cosmos.booking.release"
+  | "cosmos.booking.expire" | "azure_openai.referrals.interpret";
 type Event =
   | "voice_request_started" | "voice_request_completed" | "voice_request_aborted" | "voice_request_slow"
   | "voice_request_rejected" | "voice_turn_received" | "voice_request_failed"
@@ -26,6 +28,8 @@ const knownErrorTypes = new Set([
   "Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError",
   "RestError", "ErrorResponse", "AggregateAuthenticationError", "CredentialUnavailableError",
   "AuthenticationError", "AuthenticationRequiredError",
+  "APIError", "APIConnectionError", "APIConnectionTimeoutError", "RateLimitError",
+  "BadRequestError", "PermissionDeniedError", "NotFoundError",
 ]);
 const networkCodes = new Set([
   "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN",
@@ -38,20 +42,22 @@ const schemaFields = new Set([
   "status", "received_at", "scheduling", "contact_attempts", "last_contact_at",
   "next_contact_at", "appointment_at", "is_demo", "demo_dataset", "name", "organization",
   "address", "street", "city", "state", "zip", "services", "hours", "starts_at", "ends_at", "time_zone",
+  "booking", "slot_id", "requested_at", "booked_at",
+  "intent", "action", "choice", "patientNumber", "fullName", "date", "period",
 ]);
 const statusHints: Record<number, string> = {
-  400: "Check Cosmos query syntax, indexing policy, and partition key configuration.",
+  400: "Check the dependency request, query/schema, model support, and resource configuration.",
   401: "Check Azure login and which identity DefaultAzureCredential selected.",
-  403: "Check Cosmos data-plane RBAC permissions and network/firewall access.",
-  404: "Check the configured Cosmos database, container, and referenced demo records.",
+  403: "Check service data-plane RBAC permissions and network/firewall access.",
+  404: "Check the configured resource, deployment, database, container, and referenced demo records.",
   408: "The dependency timed out; inspect request duration and network connectivity.",
-  429: "Cosmos throughput was exceeded; check request units and throttling metrics.",
+  429: "Dependency quota was exceeded; check Cosmos request units or Azure OpenAI token/rate limits.",
 };
 
 export function errorDetails(error: unknown) {
   const record = typeof error === "object" && error !== null ? error : {};
   const code = "code" in record ? record.code : undefined;
-  const status = "statusCode" in record ? record.statusCode : undefined;
+  const status = "statusCode" in record ? record.statusCode : "status" in record ? record.status : undefined;
   const numericStatus = typeof code === "number" ? code : typeof status === "number" ? status : undefined;
   const statusCode = numericStatus !== undefined && Number.isInteger(numericStatus)
     && numericStatus >= 100 && numericStatus <= 599 ? numericStatus : undefined;

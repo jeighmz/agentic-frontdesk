@@ -268,11 +268,12 @@ This referral dataset is separate from the original voice demo's
 `synthetic-frontdesk` aggregate. Enable referral mode below to read the seeded
 patients and clinics over Twilio.
 
-## Read-only referral appointment availability
+## Referral availability and confirmed demo booking
 
-This mode uses Cosmos DB and the existing Twilio voice interface, **without
-Azure OpenAI or Elasticsearch**. The Azure OpenAI adapter exists for the original
-`MODE=cloud` flow, but is not called in `MODE=referrals`.
+This mode uses Cosmos DB and the existing Twilio voice interface.
+It works **without Azure OpenAI or Elasticsearch** by default. Optionally enable
+Azure OpenAI below for natural-language interpretation; Elasticsearch is still
+not required.
 
 ### 1. Add the availability container
 
@@ -364,17 +365,131 @@ continues to work as before.
   excluded. A patient may have no active referrals; try another demo number.
 - Say **"availability"** to refresh, another patient number or fictional full
   name to switch patients, or **"staff"** to use the configured handoff.
-- Booking, confirmation, and rescheduling are explicitly disabled: no slots are
-  reserved and no patient/referral documents are changed.
+- Say **"book option one"**, **"book option two"**, or **"option three"** using
+  an offered choice. The bot repeats the service, clinic, date, time, and duration.
+  Nothing is reserved until you say **"yes"** or **"confirm"**.
+- Before confirmation, **"no"** discards the proposal without writing anything.
+  Decline first if you want to switch patients or referrals.
+- On confirmation, the app conditionally claims the slot in `appointment_slots`
+  and updates the selected patient's referral to `scheduled`, with its appointment
+  time and scheduling status. Booked slots disappear from subsequent availability.
+  If another caller took the slot or it expired, say **"availability"** to refresh.
+- Rescheduling and cancellation of an existing appointment are not implemented.
+  Saying **"no"** only discards an unsubmitted proposal; it never cancels a booking.
 
-The voice service performs reads only and requires Cosmos data-plane read
-access; the slot seeder requires write access. Only documents matching the demo
+The voice service and seeders require **Cosmos DB Built-in Data Contributor**
+data-plane access to this database, using `DefaultAzureCredential` as above.
+No new containers or migration scripts are needed to enable booking.
+Only documents matching the demo
 schemas/markers are accepted. **Full-name matching is not identity verification.**
 There is no patient authentication, so never use this mode with real patient
 data. Call state is process-local, expires after
 30 minutes of inactivity on the next request, and resets on restart. Use a single
 app instance for this demo; multiple instances would need shared call state.
 The same 100-active-call and 20-turn demo limits apply.
+
+### Booking safeguards and interrupted requests
+
+Conditional ETag patches prevent two callers from claiming the same slot and
+prevent one referral from being booked into two different slots. The bot reports
+success only after both the slot and referral updates succeed. Replayed voice
+turns and retries reuse the same booking ID, rather than making another appointment.
+
+Cosmos cannot transact across these containers/partitions. After explicit
+confirmation, the app saves a durable intent in `referrals[].scheduling.booking`,
+claims the slot with matching ownership metadata, then marks the referral scheduled
+and the intent confirmed. It patches individual fields, preserving other patient
+fields and referrals.
+
+If a write's outcome is unknown, the app gives the existing uncertainty/handoff
+message; it does not claim failure, success, or cancellation. A retry or a later
+call selecting the same active referral resumes the already-confirmed intent.
+This recovery can complete the original booking without asking for confirmation
+again. It never creates a different booking. There is no background recovery
+worker; use staff assistance if the operation keeps failing. Expired, unclaimed
+slots with pending intents are conditionally blocked before releasing the intent,
+so a delayed duplicate request cannot claim them afterward.
+
+**Do not rerun `seed:demo` or manually reset patient/slot records while testing
+bookings.** Patient upserts overwrite referral/booking state. The create-only
+`seed:availability` command preserves existing booked and blocked slots.
+All these appointments remain fictional and are not sent to any hospital/EHR.
+
+### Optional Azure OpenAI natural-language routing
+
+Use an Azure OpenAI resource with a Chat Completions deployment supporting strict
+function tools, such as `gpt-4.1-mini`. Deploy it in your chosen region using a
+pay-as-you-go SKU rather than provisioned throughput. Model availability and
+quota vary by subscription. This integration does not need a Foundry project,
+Elasticsearch, another Cosmos container, or an API key.
+
+Grant your signed-in developer identity **Cognitive Services OpenAI User** on
+the OpenAI resource (this is separate from Cosmos data access):
+
+```sh
+az login
+az role assignment create \
+  --assignee-object-id "$(az ad signed-in-user show --query id --output tsv)" \
+  --assignee-principal-type User \
+  --role "Cognitive Services OpenAI User" \
+  --scope "$(az cognitiveservices account show \
+    --resource-group YOUR_RESOURCE_GROUP --name YOUR_OPENAI_RESOURCE \
+    --query id --output tsv)"
+```
+
+In `.env`, keep `MODE=referrals` and set:
+
+```dotenv
+REFERRAL_AI_ENABLED=true
+AZURE_OPENAI_ENDPOINT=https://YOUR_OPENAI_RESOURCE.openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT=YOUR_DEPLOYMENT_NAME
+AZURE_OPENAI_API_VERSION=2024-10-21
+AZURE_OPENAI_API_KEY=
+```
+
+The deployment name is not necessarily the model name. Keep the API key blank;
+referral mode uses `DefaultAzureCredential` and Entra tokens. Restart the app
+with `npm run dev`; the listening log reports `referralAIEnabled: true`.
+Role assignments can take time to propagate. Set `REFERRAL_AI_ENABLED=false`
+to return to the original exact-command flow without removing Azure settings.
+
+After identifying a fictional patient and choosing a referral, try:
+
+- **"Anything Thursday afternoon?"**
+- **"Show me morning appointments."**
+- **"The second appointment works for me."**
+
+Date searches cover today through the next 30 days, subject to seeded inventory.
+Morning means starts before noon, afternoon noon–5 PM, and evening 5 PM onward,
+all in `America/New_York`. The app applies these filters in Cosmos **before**
+choosing the next three slots, including across daylight-saving transitions.
+Say **"availability"** to refresh the current search or **"show any time"** to
+remove date/time preferences. Exact time cutoffs, date ranges, and clinic changes
+are not supported in this first interpreter; use a date and a day period instead.
+
+The model returns one validated intent, not spoken medical advice or a booking
+result. It cannot supply document IDs, write Cosmos, or bypass offered choices.
+Selecting a time only proposes it. While confirmation is pending, the model is
+not called: say **"yes"** / **"confirm"** or **"no"** explicitly. Existing booking
+ownership, replay, and recovery protections remain in application code.
+
+Only the current utterance, local date/time zone, selection-state flags/counts,
+and offered option numbers/times go to Azure OpenAI. Patient documents, contact
+details, referral reasons, credentials, and raw call identifiers are not sent.
+An utterance can itself contain a fictional name: never use real patient data.
+Model errors/refusals/timeouts use the existing uncertainty/handoff path;
+there is no silent model-error fallback or model-generated success claim.
+Exact commands and confirmation do not need a model request.
+
+**Cost controls:** each model request allows at most 256 output tokens, has a
+five-second timeout, and disables SDK retries. Configure deployment token/rate
+limits appropriate for your demo. These controls are **not a dollar spending cap**.
+In Azure Portal, use **Cost Management → Budgets → Add**, filter to your OpenAI
+resource, and set a $20 budget with alerts at 50%, 80%, and 100%.
+[Azure budgets](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)
+do not stop requests, reset periodically, and use delayed cost data (typically
+8–24 hours). They are not a prepaid "$20 until refilled" balance. No automatic
+spending cutoff or application budget wallet is implemented.
 
 ### Terminal diagnostics
 
@@ -388,8 +503,9 @@ Voice requests now print structured JSON logs to the app terminal:
   the speech text.
 - `dependency_operation_started` / `dependency_operation_completed` /
   `dependency_operation_failed`: the specific referral Cosmos operation
-  (`cosmos.patient.read`, `cosmos.patient.name_query`, `cosmos.clinic.read`, or
-  `cosmos.slots.query`), duration,
+  (`cosmos.patient.read`, `cosmos.patient.name_query`, `cosmos.clinic.read`,
+  `cosmos.slots.query`, `cosmos.referral.book`, `cosmos.booking.*`, or
+  `azure_openai.referrals.interpret`), duration,
   and safe error details. Container checks are logged at startup as well.
 - `voice_request_failed`: sanitized error type, Cosmos HTTP/substatus codes and
   activity ID when available, troubleshooting hints, or schema issue field
@@ -422,7 +538,8 @@ message, **not** that the requested operation succeeded.
   accessibility/language support, escalation ownership, and emergency messaging
   with the hospital. The model must never act as a clinical decision maker.
 - Caller speech is processed by Twilio and, in cloud mode, sent to
-  Elasticsearch and Azure OpenAI. Raw speech text is not stored by this app.
+  Elasticsearch and Azure OpenAI. With referral AI enabled, natural-language
+  requests are sent to Azure OpenAI as described above. Raw speech text is not stored by this app.
   Configure vendor-side logging/retention separately. Never test with PHI.
 - Call state retains the last generated prompt, pending action, and turn counter.
   Sessions expire after 30 minutes and are removed lazily on the next successful

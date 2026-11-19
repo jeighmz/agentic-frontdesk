@@ -4,11 +4,13 @@ import { readConfig } from "./config.ts";
 import { Frontdesk } from "./frontdesk.ts";
 import { CosmosReferralStore } from "./referral-store.ts";
 import { ReferralFrontdesk } from "./referral-frontdesk.ts";
+import { AzureReferralInterpreter } from "./referral-interpreter.ts";
 import type { Config } from "./config.ts";
 import type { VoiceHandler } from "./domain.ts";
 
 async function initialize(config: Config): Promise<{ frontdesk: VoiceHandler; close(): Promise<void> }> {
   if (config.MODE === "referrals") {
+    const interpreter = config.referrals.openai ? new AzureReferralInterpreter(config.referrals.openai) : undefined;
     const store = new CosmosReferralStore(config.referrals.COSMOS_ENDPOINT);
     try {
       await store.checkContainers();
@@ -16,7 +18,7 @@ async function initialize(config: Config): Promise<{ frontdesk: VoiceHandler; cl
       store.close();
       throw error;
     }
-    return { frontdesk: new ReferralFrontdesk(store), close: async () => store.close() };
+    return { frontdesk: new ReferralFrontdesk(store, Date.now, interpreter), close: async () => store.close() };
   }
   const store = config.MODE === "cloud" ? new CosmosStore(config.cloud) : new MemoryStore();
   const knowledge = config.MODE === "cloud" ? new ElasticKnowledge(config.cloud) : new DemoKnowledge();
@@ -36,7 +38,10 @@ async function initialize(config: Config): Promise<{ frontdesk: VoiceHandler; cl
 const config = readConfig(process.env);
 const services = await initialize(config);
 const server = createApp(config, services.frontdesk).listen(config.PORT, () => {
-  console.log(JSON.stringify({ event: "listening", port: config.PORT, mode: config.MODE, syntheticDataOnly: true }));
+  console.log(JSON.stringify({
+    event: "listening", port: config.PORT, mode: config.MODE, syntheticDataOnly: true,
+    referralAIEnabled: config.MODE === "referrals" && config.referrals.REFERRAL_AI_ENABLED,
+  }));
 });
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {

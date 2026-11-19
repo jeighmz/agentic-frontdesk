@@ -34,6 +34,13 @@ const schedulingSchema = z.object({
   next_contact_at: z.iso.datetime().nullable(),
   appointment_at: z.iso.datetime().nullable(),
   status: schedulingStatusSchema,
+  booking: z.object({
+    id: z.uuid(),
+    slot_id: z.string().min(1),
+    clinic_id: z.string(),
+    requested_at: z.iso.datetime(),
+    state: z.enum(["pending", "confirmed"]),
+  }).optional(),
 });
 const referralSchema = z.object({
   referral_id: z.string().regex(/^ref_\d{4}$/),
@@ -80,6 +87,10 @@ export type Scheduling = z.infer<typeof schedulingSchema>;
 export type Referral = z.infer<typeof referralSchema>;
 export type Clinic = z.infer<typeof clinicSchema>;
 export type Patient = z.infer<typeof patientSchema>;
+
+export function isSchedulableReferral(referral: Referral): boolean {
+  return ["pending_contact", "contacted", "scheduling", "unable_to_reach"].includes(referral.status);
+}
 
 export function normalizePatientFullName(value: string): string | null {
   // Legacy seed data used a "Demo " marker; accept both name formats.
