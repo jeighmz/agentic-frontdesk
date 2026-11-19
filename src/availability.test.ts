@@ -163,6 +163,7 @@ test("voice patient lookup reads the correct referral/clinic, replays turns and 
   const greeting = await handler.handle("call", 0, "");
   assert.match(greeting.reply.message, /booking is not enabled/);
   const result = await handler.handle("call", 1, patient.id);
+  assert.ok(result.reply.message.startsWith(`Welcome, ${patient.first_name}.`));
   assert.match(result.reply.message, new RegExp(clinic.name));
   assert.match(result.reply.message, /Option 1/);
   assert.match(result.reply.message, /EST/);
@@ -227,6 +228,7 @@ test("full-name voice lookup accepts natural prefixes, optional Demo marker, apo
     const callId = `name-call-${index}`;
     await handler.handle(callId, 0, "");
     const result = await handler.handle(callId, 1, speech);
+    assert.match(result.reply.message, /^Welcome, Anne-Marie\./);
     assert.match(result.reply.message, new RegExp(clinic.name));
     assert.match(result.reply.message, /Option 1/);
   }
@@ -240,12 +242,13 @@ test("ambiguous and unmatched names clear prior patient context and permit ID fa
   records.set("patient_999", { ...structuredClone(patient), id: "patient_999", patient_id: "patient_999" });
   const ambiguous = await handler.handle("call", 2, fullName);
   assert.match(ambiguous.reply.message, /More than one demo patient matches/);
-  assert.doesNotMatch(ambiguous.reply.message, /Option 1|Referral 1/);
+  assert.doesNotMatch(ambiguous.reply.message, /Welcome,|Option 1|Referral 1/);
   assert.equal(queries.length, 1);
   assert.match((await handler.handle("call", 3, "availability")).reply.message, /Say a demo patient number/);
   assert.match((await handler.handle("call", 4, patient.id)).reply.message, /Option 1/);
   const missing = await handler.handle("call", 5, "My name is Fictional Missingperson");
   assert.match(missing.reply.message, /not found/);
+  assert.doesNotMatch(missing.reply.message, /Welcome,/);
   assert.match((await handler.handle("call", 6, "availability")).reply.message, /Say a demo patient number/);
   assert.equal(queries.length, 2);
 });
@@ -262,9 +265,11 @@ test("a first name alone cannot select a patient and name lookup retains referra
   const choices = await handler.handle("call", 2, `${patient.first_name} ${patient.last_name}`);
   assert.match(choices.reply.message, /Referral 1:/);
   assert.match(choices.reply.message, /Referral 2:/);
+  assert.ok(choices.reply.message.startsWith(`Welcome, ${patient.first_name}.`));
   assert.doesNotMatch(choices.reply.message, /Option 1/);
   const availability = await handler.handle("call", 3, "referral two");
   assert.match(availability.reply.message, /from Demo Other Hospital/);
+  assert.doesNotMatch(availability.reply.message, /Welcome,/);
 });
 
 test("multiple active referrals require an explicit choice and terminal referrals are excluded", async () => {

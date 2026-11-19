@@ -352,6 +352,9 @@ selected and the caller must use a demo patient number; the app does not read
 candidate names, dates of birth, or contact details. Patient-number lookup
 continues to work as before.
 
+- After a unique patient match, the bot welcomes the caller by the stored first
+  name before presenting referral details. A legacy `Demo ` prefix is omitted
+  from the welcome. Unmatched or ambiguous lookups do not receive a named welcome.
 - If the patient has one active referral, it reads the next three available
   slots for that destination clinic and service.
 - With multiple active referrals, say **"referral one"** or **"referral two"**

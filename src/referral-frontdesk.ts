@@ -122,7 +122,9 @@ export class ReferralFrontdesk implements VoiceHandler {
         patient = matches[0] ?? null;
       }
       if (!patient) return say("That demo patient was not found. Say their fictional first and last name again, a demo patient number, or staff.");
-      return this.selectPatient(session, patient, now);
+      const response = await this.selectPatient(session, patient, now);
+      const firstName = patient.first_name.trim().replace(/^Demo\s+(?=\S)/i, "");
+      return { ...response, message: `Welcome, ${firstName}. ${response.message}` };
     }
     if (!session.patientId) return say("Say a demo patient number, for example patient one, or the fictional patient's first and last name. Do not give real personal information.");
     const referralNumber = selection(speech, "referral", 3);
