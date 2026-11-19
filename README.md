@@ -500,8 +500,20 @@ Exact commands and simple yes/no confirmations do not need a model request;
 natural-language confirmations use the same bounded Azure interpreter.
 
 **Cost controls:** each model request allows at most 256 output tokens, has a
-five-second timeout, and disables SDK retries. Configure deployment token/rate
-limits appropriate for your demo. These controls are **not a dollar spending cap**.
+five-second timeout, and disables SDK retries. Both Azure adapters share a local
+development guard: **100 model requests per running process**, **10 requests per
+rolling minute**, and **one in-flight model request**. Failed requests consume
+the allowance too. Excess requests are rejected before reaching Azure, with no
+queue or automatic retry; voice callers hear an explicit AI-limit/busy message
+and are offered the configured staff handoff. Exact commands that do not need AI
+can still work.
+
+The 100-request allowance does not refill with time; restarting the app resets
+it. Separate app processes/workers each have their own allowance. This is not a
+durable wallet, subscription-wide safeguard, or a token/dollar spending cap.
+It does not limit Cosmos, Twilio, calls from other applications, or creation of
+expensive Azure resources. Use Azure Policy/RBAC and service quotas separately
+to restrict provisioning, and configure deployment token/rate limits too.
 In Azure Portal, use **Cost Management → Budgets → Add**, filter to your OpenAI
 resource, and set a $20 budget with alerts at 50%, 80%, and 100%.
 [Azure budgets](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)
@@ -532,6 +544,9 @@ Voice requests now print structured JSON logs to the app terminal:
 - `voice_request_rejected`: signature failures (403) or malformed payloads (400).
   Check `PUBLIC_BASE_URL`, the current tunnel URL, and `TWILIO_AUTH_TOKEN` if
   signature validation fails.
+- `llm_request_blocked`: the local `process`, `rate`, or `concurrency` guard
+  rejected a model request, including requests used/remaining for this process.
+  No transcript or patient details are logged.
 - `voice_request_slow`: no response after 8 seconds; this is a warning, not a
   change to request timeouts. `voice_request_aborted` means the connection closed
   before a response finished.

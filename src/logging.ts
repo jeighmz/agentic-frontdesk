@@ -10,7 +10,8 @@ type Operation = "cosmos.containers.check" | "cosmos.patient.read" | "cosmos.pat
 type Event =
   | "voice_request_started" | "voice_request_completed" | "voice_request_aborted" | "voice_request_slow"
   | "voice_request_rejected" | "voice_turn_received" | "voice_request_failed"
-  | "dependency_operation_started" | "dependency_operation_completed" | "dependency_operation_failed";
+  | "dependency_operation_started" | "dependency_operation_completed" | "dependency_operation_failed"
+  | "llm_request_blocked";
 type Details = {
   operation?: Operation;
   mode?: "demo" | "cloud" | "referrals";
@@ -21,11 +22,14 @@ type Details = {
   speechPresent?: boolean;
   category?: "state_conflict" | "request_error";
   reason?: "invalid_signature" | "invalid_payload";
+  limit?: "process" | "rate" | "concurrency";
+  requestsUsed?: number;
+  requestsRemaining?: number;
   error?: ReturnType<typeof errorDetails>;
 };
 
 const knownErrorTypes = new Set([
-  "Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError",
+  "Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "ModelUsageLimitError",
   "RestError", "ErrorResponse", "AggregateAuthenticationError", "CredentialUnavailableError",
   "AuthenticationError", "AuthenticationRequiredError",
   "APIError", "APIConnectionError", "APIConnectionTimeoutError", "RateLimitError",

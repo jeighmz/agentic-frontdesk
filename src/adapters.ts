@@ -3,6 +3,7 @@ import { Client } from "@elastic/elasticsearch";
 import { AzureOpenAI } from "openai";
 import { zodFunction } from "openai/helpers/zod";
 import type { Config } from "./config.ts";
+import { MODEL_REQUEST_LIMITS, ModelRequestGuard, modelRequestGuard } from "./model-guard.ts";
 import {
   StateConflict, decisionSchema, demoFaqs, faqSchema, seedState, stateSchema,
   type Decision, type Knowledge, type Planner, type PlanningContext, type State, type Store,
@@ -152,9 +153,11 @@ export class DemoPlanner implements Planner {
 export class AzurePlanner implements Planner {
   private client: AzureOpenAI;
   private deployment: string;
+  private guard: ModelRequestGuard;
 
-  constructor(config: Extract<Config, { MODE: "cloud" }>["cloud"]) {
-    this.client = new AzureOpenAI({
+  constructor(config: Extract<Config, { MODE: "cloud" }>["cloud"], client?: AzureOpenAI, guard = modelRequestGuard) {
+    this.guard = guard;
+    this.client = client ?? new AzureOpenAI({
       endpoint: config.AZURE_OPENAI_ENDPOINT,
       apiKey: config.AZURE_OPENAI_API_KEY,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
@@ -166,8 +169,9 @@ export class AzurePlanner implements Planner {
   }
 
   async decide(context: PlanningContext): Promise<Decision> {
-    const result = await this.client.chat.completions.create({
+    const result = await this.guard.run(() => this.client.chat.completions.create({
       model: this.deployment,
+      max_completion_tokens: MODEL_REQUEST_LIMITS.maxOutputTokens,
       messages: [
         {
           role: "system",
@@ -187,7 +191,7 @@ export class AzurePlanner implements Planner {
       tools: [zodFunction({ name: "frontdesk_decision", parameters: decisionSchema })],
       tool_choice: { type: "function", function: { name: "frontdesk_decision" } },
       parallel_tool_calls: false,
-    });
+    }));
     const tool = result.choices[0]?.message.tool_calls?.[0];
     if (!tool || tool.type !== "function" || tool.function.name !== "frontdesk_decision") {
       throw new Error("Azure OpenAI did not return a front-desk decision");

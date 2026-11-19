@@ -3,10 +3,13 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import { AzureOpenAI } from "openai";
 import { readConfig } from "./config.ts";
 import { AzureReferralInterpreter, type ReferralContext, type ReferralIntent } from "./referral-interpreter.ts";
+import { AzurePlanner } from "./adapters.ts";
+import { ModelRequestGuard, ModelUsageLimitError } from "./model-guard.ts";
 
 beforeEach(() => {
   mock.method(console, "log", () => {});
   mock.method(console, "error", () => {});
+  mock.method(console, "warn", () => {});
 });
 afterEach(() => mock.restoreAll());
 
@@ -14,6 +17,14 @@ const config = {
   AZURE_OPENAI_ENDPOINT: "https://openai.example.com",
   AZURE_OPENAI_DEPLOYMENT: "test-deployment",
   AZURE_OPENAI_API_VERSION: "2024-10-21",
+};
+const cloudConfig = {
+  ...config,
+  AZURE_OPENAI_API_KEY: "synthetic-test-key",
+  COSMOS_ENDPOINT: "https://cosmos.example.com", COSMOS_KEY: "synthetic-test-key",
+  COSMOS_DATABASE: "test-db", COSMOS_CONTAINER: "test-container",
+  ELASTICSEARCH_URL: "https://search.example.com", ELASTICSEARCH_API_KEY: "synthetic-test-key",
+  ELASTICSEARCH_INDEX: "test-index",
 };
 const context: ReferralContext = {
   speech: "The second appointment works for me.",
@@ -42,7 +53,7 @@ function completion(value: unknown, finishReason = "tool_calls", name = "referra
   };
 }
 
-function interpreter(response: unknown, status = 200) {
+function interpreter(response: unknown, status = 200, guard = new ModelRequestGuard()) {
   const requests: unknown[] = [];
   const sdk = new AzureOpenAI({
     endpoint: config.AZURE_OPENAI_ENDPOINT, apiVersion: config.AZURE_OPENAI_API_VERSION,
@@ -53,7 +64,7 @@ function interpreter(response: unknown, status = 200) {
       return new Response(JSON.stringify(response), { status, headers: { "content-type": "application/json" } });
     },
   });
-  return { planner: new AzureReferralInterpreter(config, sdk), requests };
+  return { planner: new AzureReferralInterpreter(config, sdk, guard), requests, sdk };
 }
 
 test("Azure routing uses a single bounded function decision, not model-generated spoken responses", async () => {
@@ -109,6 +120,57 @@ test("Azure failures are surfaced once with sanitized status metadata, not succe
   assert.match(entries.join(), /"statusCode":503/);
   assert.ok(!entries.join().includes(privateMessage));
   assert.ok(!entries.join().includes(context.speech));
+});
+
+test("both Azure adapters reject overlapping requests before sending HTTP", async () => {
+  const guard = new ModelRequestGuard();
+  const release = Promise.withResolvers<void>();
+  const pending = guard.run(() => release.promise);
+  const { planner, requests, sdk } = interpreter(completion(intent), 200, guard);
+  const cloud = new AzurePlanner(cloudConfig, sdk, guard);
+  try {
+    await assert.rejects(planner.interpret(context), ModelUsageLimitError);
+    await assert.rejects(cloud.decide({
+      speech: "availability", previousPrompt: "", slots: [], appointments: [], faqs: [],
+    }), ModelUsageLimitError);
+    assert.equal(requests.length, 0);
+  } finally {
+    release.resolve();
+    await pending;
+  }
+  assert.deepEqual(await planner.interpret(context), intent);
+  assert.equal(requests.length, 1);
+});
+
+test("cloud planner requests also have a bounded output size", async () => {
+  const decision = { action: "availability", slotId: null, appointmentId: null, faqId: null };
+  const response = completion(decision, "tool_calls", "frontdesk_decision");
+  const tool = response.choices[0]?.message.tool_calls[0];
+  assert.ok(tool);
+  tool.function.arguments = JSON.stringify(decision);
+  const guard = new ModelRequestGuard();
+  const { sdk, requests } = interpreter(response, 200, guard);
+  const planner = new AzurePlanner(cloudConfig, sdk, guard);
+  assert.deepEqual(await planner.decide({
+    speech: "availability", previousPrompt: "", slots: [], appointments: [], faqs: [],
+  }), decision);
+  const body = requests[0];
+  assert.ok(typeof body === "object" && body !== null && "max_completion_tokens" in body);
+  assert.ok(typeof body.max_completion_tokens === "number" && body.max_completion_tokens > 0 && body.max_completion_tokens <= 256);
+});
+
+test("a failing provider loop sends at most one hundred HTTP requests per guard lifetime", async () => {
+  let now = 0;
+  const guard = new ModelRequestGuard(() => now);
+  const { planner, requests } = interpreter({ error: { message: "Synthetic provider failure" } }, 503, guard);
+  for (let index = 0; index < 100; index += 1) {
+    now = index * 6_000;
+    await assert.rejects(planner.interpret(context), { status: 503 });
+  }
+  now += 60 * 60_000;
+  await assert.rejects(planner.interpret(context),
+    (error) => error instanceof ModelUsageLimitError && error.limit === "process");
+  assert.equal(requests.length, 100);
 });
 
 test("referral AI is opt-in and uses Azure configuration without requiring search or a key", () => {

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { Config } from "./config.ts";
 import { StateConflict, type Reply, type VoiceHandler } from "./domain.ts";
 import { errorDetails, log, requestContext } from "./logging.ts";
+import { ModelUsageLimitError } from "./model-guard.ts";
 
 const webhookSchema = z.object({
   CallSid: z.string().regex(/^CA[0-9a-f]{32}$/i),
@@ -115,7 +116,9 @@ export function createApp(config: Config, frontdesk: VoiceHandler) {
       error: errorDetails(error),
     });
     response.status(200).type("text/xml").send(voiceXml(config, {
-      message: "I could not verify the result of that request. Please ask staff to check the schedule before trying again.",
+      message: error instanceof ModelUsageLimitError
+        ? "The demo AI request limit was reached or the AI is busy. No new AI request was sent. Please contact staff for help."
+        : "I could not verify the result of that request. Please ask staff to check the schedule before trying again.",
       transfer: true,
       end: false,
     }, 0));

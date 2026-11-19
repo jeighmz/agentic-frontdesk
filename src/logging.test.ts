@@ -6,6 +6,7 @@ import twilio from "twilio";
 import { createApp } from "./app.ts";
 import { readConfig } from "./config.ts";
 import { errorDetails, observeOperation, requestContext } from "./logging.ts";
+import { ModelUsageLimitError } from "./model-guard.ts";
 
 test("error diagnostics expose safe Cosmos metadata but never arbitrary error content", () => {
   const secret = "sensitive-patient-and-credential-content";
@@ -135,4 +136,38 @@ test("voice requests log lifecycle, rejected signatures and sanitized failures w
   assert.ok(entries.map((entry) => JSON.parse(entry)).some((entry) =>
     entry.event === "voice_request_rejected" && entry.reason === "invalid_payload"));
   for (const sensitive of [speech, token, body.CallSid]) assert.ok(!entries.join().includes(sensitive));
+});
+
+test("a model guard rejection speaks an explicit limit message without an automatic retry", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const errors: string[] = [];
+  t.mock.method(console, "error", (entry: string) => errors.push(entry));
+  const config = readConfig({
+    PUBLIC_BASE_URL: "https://voice.example.com", TWILIO_AUTH_TOKEN: "synthetic-test-token",
+  });
+  const server = createApp(config, {
+    async handle() { throw new ModelUsageLimitError("process"); },
+  }).listen(0, "127.0.0.1");
+  t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const body = { CallSid: `CA${"e".repeat(32)}`, SpeechResult: "synthetic speech" };
+  const response = await fetch(`http://127.0.0.1:${address.port}/voice`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-twilio-signature": twilio.getExpectedTwilioSignature(
+        config.TWILIO_AUTH_TOKEN, `${config.PUBLIC_BASE_URL}/voice`, body,
+      ),
+    },
+    body: new URLSearchParams(body),
+  });
+  assert.equal(response.status, 200);
+  const xml = await response.text();
+  assert.match(xml, /AI request limit was reached or the AI is busy/);
+  assert.match(xml, /No new AI request was sent/);
+  assert.match(xml, /<Hangup\s*\/>/);
+  assert.doesNotMatch(xml, /<Gather/);
+  assert.equal(JSON.parse(errors[0] ?? "{}").error.type, "ModelUsageLimitError");
 });

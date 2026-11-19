@@ -5,6 +5,7 @@ import { z } from "zod";
 import { availabilityPreferenceSchema, type AvailabilityPreference } from "./availability.ts";
 import type { AzureOpenAIConfig } from "./config.ts";
 import { observeOperation } from "./logging.ts";
+import { MODEL_REQUEST_LIMITS, ModelRequestGuard, modelRequestGuard } from "./model-guard.ts";
 
 export const referralIntentSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("patient_number"), patientNumber: z.number().int().min(1).max(100) }).strict(),
@@ -34,8 +35,10 @@ export interface ReferralInterpreter {
 export class AzureReferralInterpreter implements ReferralInterpreter {
   private client: AzureOpenAI;
   private deployment: string;
+  private guard: ModelRequestGuard;
 
-  constructor(config: AzureOpenAIConfig, client?: AzureOpenAI) {
+  constructor(config: AzureOpenAIConfig, client?: AzureOpenAI, guard = modelRequestGuard) {
+    this.guard = guard;
     this.client = client ?? new AzureOpenAI({
       endpoint: config.AZURE_OPENAI_ENDPOINT,
       apiVersion: config.AZURE_OPENAI_API_VERSION,
@@ -48,10 +51,10 @@ export class AzureReferralInterpreter implements ReferralInterpreter {
   }
 
   async interpret(context: ReferralContext): Promise<ReferralIntent> {
-    return observeOperation("azure_openai.referrals.interpret", async () => {
+    return this.guard.run(() => observeOperation("azure_openai.referrals.interpret", async () => {
       const response = await this.client.chat.completions.create({
         model: this.deployment,
-        max_completion_tokens: 256,
+        max_completion_tokens: MODEL_REQUEST_LIMITS.maxOutputTokens,
         messages: [
           {
             role: "system",
@@ -92,6 +95,6 @@ export class AzureReferralInterpreter implements ReferralInterpreter {
         throw new Error("Azure OpenAI did not return one complete referral intent");
       }
       return toolSchema.parse(JSON.parse(tool.function.arguments)).intent;
-    });
+    }));
   }
 }
