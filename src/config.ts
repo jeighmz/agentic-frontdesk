@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const httpsUrl = z.url().refine((value) => new URL(value).protocol === "https:", "HTTPS is required");
 const shared = z.object({
-  MODE: z.enum(["demo", "cloud"]).default("demo"),
+  MODE: z.enum(["demo", "cloud", "referrals"]).default("demo"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   PUBLIC_BASE_URL: httpsUrl.refine(
     (value) => {
@@ -40,6 +40,12 @@ const cloud = z.object({
 
 export function readConfig(env: NodeJS.ProcessEnv) {
   const base = shared.parse(env);
+  if (base.MODE === "referrals") {
+    return {
+      ...base, MODE: "referrals" as const,
+      referrals: z.object({ COSMOS_ENDPOINT: httpsUrl }).parse(env),
+    };
+  }
   return base.MODE === "cloud"
     ? { ...base, MODE: "cloud" as const, cloud: cloud.parse(env) }
     : { ...base, MODE: "demo" as const };

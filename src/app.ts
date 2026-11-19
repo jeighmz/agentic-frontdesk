@@ -2,8 +2,7 @@ import express from "express";
 import twilio from "twilio";
 import { z } from "zod";
 import type { Config } from "./config.ts";
-import { StateConflict, type Reply } from "./domain.ts";
-import type { Frontdesk } from "./frontdesk.ts";
+import { StateConflict, type Reply, type VoiceHandler } from "./domain.ts";
 
 const webhookSchema = z.object({
   CallSid: z.string().regex(/^CA[0-9a-f]{32}$/i),
@@ -39,7 +38,7 @@ function voiceXml(config: Config, response: Reply, callTurn: number): string {
   return voice.toString();
 }
 
-export function createApp(config: Config, frontdesk: Frontdesk) {
+export function createApp(config: Config, frontdesk: VoiceHandler) {
   const app = express();
   app.disable("x-powered-by");
   app.get("/healthz", (_request, response) => {

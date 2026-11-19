@@ -3,14 +3,14 @@ import { DefaultAzureCredential } from "@azure/identity";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { REFERRALS_DATABASE, CLINICS_CONTAINER, PATIENTS_CONTAINER } from "../referral-models.ts";
 import {
   DEFAULT_AS_OF, generateClinics, generatePatients, referenceTime, referralStatuses, validateDemoData,
   type Clinic, type Patient,
 } from "./demo-data.ts";
 
-export const DATABASE = "hospital-network-db";
-export const CLINICS_CONTAINER = "clinics";
-export const PATIENTS_CONTAINER = "patients";
+export const DATABASE = REFERRALS_DATABASE;
+export { CLINICS_CONTAINER, PATIENTS_CONTAINER };
 
 type UpsertContainer = {
   items: { upsert(document: Clinic | Patient): Promise<unknown> };

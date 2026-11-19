@@ -1,8 +1,9 @@
 # Agentic front desk
 
 Initial **synthetic-data-only** hospital voice agent. No real appointments or
-patient identities are supported. All callers share one fictional patient and
-schedule. Do not route a real hospital number here or enter patient information.
+patient identities are supported. The default demo shares one fictional patient
+and schedule; referral mode reads seeded fictional patients and clinics.
+Do not route a real hospital number here or enter patient information.
 
 ## Architecture
 
@@ -222,7 +223,7 @@ npm run seed:demo -- --seed=42
 `COSMOS_ENDPOINT` is the only required environment variable for ingestion.
 The seeder reads the shell environment, **not `.env`**, and does not depend on
 `MODE`, Elasticsearch, Azure OpenAI, or the voice server. Database and container
-names are constants in `src/scripts/seed-demo-data.ts`.
+names are shared constants in `src/referral-models.ts`.
 
 The dataset includes:
 
@@ -262,9 +263,101 @@ cross-container transaction: if one fails, the script exits unsuccessfully and
 may leave partial progress. Fix the issue and rerun with the same arguments.
 There is deliberately no reset/delete option.
 
-This referral dataset is separate from the voice app's current
-`synthetic-frontdesk` aggregate. Seeding it does **not** make the voice agent
-read these patients or clinics; integrating that schema is a separate step.
+This referral dataset is separate from the original voice demo's
+`synthetic-frontdesk` aggregate. Enable referral mode below to read the seeded
+patients and clinics over Twilio.
+
+## Read-only referral appointment availability
+
+This mode uses Cosmos DB and the existing Twilio voice interface, **without
+Azure OpenAI or Elasticsearch**. The Azure OpenAI adapter exists for the original
+`MODE=cloud` flow, but is not called in `MODE=referrals`.
+
+### 1. Add the availability container
+
+In Azure Portal, open your Cosmos account's **Data Explorer**, select
+`hospital-network-db`, and create a container with these exact settings:
+
+| Container | Partition key | Purpose |
+|---|---|---|
+| `clinics` (existing) | `/id` | Seeded fictional clinic details and hours |
+| `patients` (existing) | `/id` | Seeded fictional patients and referrals |
+| `appointment_slots` (new) | **`/clinic_id`** | Synthetic clinic/service availability |
+
+Do not recreate or rename `clinics` or `patients`. Review the throughput/cost
+settings before creating the new container. The application and seeder do not
+create containers. The database-scoped Cosmos data-plane role documented above
+covers the new container.
+
+### 2. Generate synthetic slots from the existing clinics
+
+```sh
+az login
+export COSMOS_ENDPOINT="https://cosmos-db-resource.documents.azure.com:443/"
+
+# Reads actual demo clinics and checks container partition keys; no writes:
+npm run seed:availability -- --dry-run
+
+# Inserts missing demo availability:
+npm run seed:availability
+```
+
+Unlike the patient seeder, this command also loads `.env` if present; exported
+environment variables take precedence. It generates 30-minute slots for each
+supported service during each clinic's listed hours, for the next 14 calendar
+days starting tomorrow in `America/New_York`. Closed days are skipped and
+daylight-saving changes are handled in that time zone. You can set `--days=7`
+(1–30) or `--as-of=2026-11-18T12:00:00Z` for a reproducible date window.
+
+Slots have stable IDs, UTC `starts_at`/`ends_at`, `clinic_id`, `service`,
+`time_zone`, `status`, and demo markers. Each clinic/service has independent
+simulated capacity; this is not a provider calendar or real booking system.
+Creating several thousand slots consumes Cosmos request units and can take
+time. Reruns preserve existing slots, including any `booked`/`blocked` status,
+instead of reopening them. Old slots are not deleted; availability queries
+exclude past starts. Rerun the seeder to extend the future window before demos.
+An interrupted run may leave partial inserts and can be safely rerun.
+
+### 3. Enable referral mode and call
+
+In `.env`, set:
+
+```dotenv
+MODE=referrals
+COSMOS_ENDPOINT=https://cosmos-db-resource.documents.azure.com:443/
+```
+
+Keep the existing `TWILIO_AUTH_TOKEN`, `PUBLIC_BASE_URL`, and tunnel setup.
+No Cosmos key, Azure OpenAI configuration, or Elasticsearch configuration is
+required in this mode. Restart the app:
+
+```sh
+npm run dev
+```
+
+Startup verifies all three containers and their partition keys. Call the Twilio
+number and say **"patient one"** (or `patient_001`). The handler accepts demo
+patient numbers 1–100, not personal names or dates of birth.
+
+- If the patient has one active referral, it reads the next three available
+  slots for that destination clinic and service.
+- With multiple active referrals, say **"referral one"** or **"referral two"**
+  after hearing the choices.
+- Active states are `pending_contact`, `contacted`, `scheduling`, and
+  `unable_to_reach`. Already scheduled, declined, or completed referrals are
+  excluded. A patient may have no active referrals; try another demo number.
+- Say **"availability"** to refresh, another patient number to switch patients,
+  or **"staff"** to use the configured handoff.
+- Booking, confirmation, and rescheduling are explicitly disabled: no slots are
+  reserved and no patient/referral documents are changed.
+
+The voice service performs reads only and requires Cosmos data-plane read
+access; the slot seeder requires write access. Only documents matching the demo
+schemas/markers are accepted. There is no patient authentication, so never use
+this mode with real patient data. Call state is process-local, expires after
+30 minutes of inactivity on the next request, and resets on restart. Use a single
+app instance for this demo; multiple instances would need shared call state.
+The same 100-active-call and 20-turn demo limits apply.
 
 ## Boundaries and next steps
 

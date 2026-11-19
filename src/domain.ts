@@ -6,6 +6,9 @@ export const replySchema = z.object({
   end: z.boolean().default(false),
 });
 export type Reply = z.infer<typeof replySchema>;
+export interface VoiceHandler {
+  handle(callId: string, turn: number, speech: string): Promise<{ reply: Reply; turn: number }>;
+}
 
 const pendingSchema = z.object({
   kind: z.enum(["book", "reschedule"]),
