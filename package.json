@@ -12,10 +12,13 @@
     "build": "tsc",
     "start": "node --env-file=.env dist/server.js",
     "test": "node --test src/*.test.ts",
+    "seed:demo": "node src/scripts/seed-demo-data.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@azure/cosmos": "^4.10.2",
+    "@azure/identity": "^4.0.0",
+    "@faker-js/faker": "^10.0.0",
     "@elastic/elasticsearch": "^9.5.1",
     "express": "^5.3.0",
     "openai": "^7.60.0",

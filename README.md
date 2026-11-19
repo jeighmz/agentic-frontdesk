@@ -174,6 +174,98 @@ npm run build
 npm start
 ```
 
+## Seed referral demo data into Cosmos DB
+
+The standalone TypeScript seeder targets the existing `hospital-network-db`
+database in `cosmos-db-resource`, with `clinics` and `patients` containers.
+Both containers must already exist with partition key **`/id`**. The script
+does not create infrastructure, delete documents, or use Cosmos keys.
+
+**Prerequisites:** Node.js 24+, `npm ci`, the Azure CLI, and an Azure identity
+with the **Cosmos DB Built-in Data Contributor** data-plane role on the target
+database or account. Azure subscription/resource Contributor access alone does
+not grant Cosmos document access.
+
+An administrator with permission to manage Cosmos SQL role assignments can
+grant the role to your signed-in user, substituting the account's resource group:
+
+```sh
+az login
+az cosmosdb sql role assignment create \
+  --account-name cosmos-db-resource \
+  --resource-group "<resource-group>" \
+  --scope "/dbs/hospital-network-db" \
+  --principal-id "$(az ad signed-in-user show --query id --output tsv)" \
+  --role-definition-id "00000000-0000-0000-0000-000000000002"
+```
+
+Allow time for a new role assignment to propagate. If the account restricts
+network access, allow your development machine's public IP or use its approved
+private network.
+
+The seeder uses `DefaultAzureCredential` from `@azure/identity`, which can use
+your Azure CLI login locally or a managed identity when hosted in Azure.
+Other configured credentials in its credential chain may take precedence over
+your CLI identity. No credentials or connection strings belong in source code.
+
+```sh
+az login
+export COSMOS_ENDPOINT="https://cosmos-db-resource.documents.azure.com:443/"
+
+# Generate and validate locally, without Azure authentication or writes:
+npm run seed:demo -- --seed=42 --dry-run
+
+# Validate, then upsert into the existing Cosmos containers:
+npm run seed:demo -- --seed=42
+```
+
+`COSMOS_ENDPOINT` is the only required environment variable for ingestion.
+The seeder reads the shell environment, **not `.env`**, and does not depend on
+`MODE`, Elasticsearch, Azure OpenAI, or the voice server. Database and container
+names are constants in `src/scripts/seed-demo-data.ts`.
+
+The dataset includes:
+
+- 10 clearly labeled fictional NYC-area clinics, with differing services/hours.
+- 100 synthetic adult patients with 125 referrals: 80 patients have one referral,
+  15 have two, and five have three. Multiple referrals use distinct source hospitals.
+- All seven referral workflow states, biased toward active work, with consistent
+  scheduling/contact timestamps and supported clinic/service relationships.
+- English, Spanish, Chinese, and Russian language preferences; SMS/voice contact
+  preferences; reserved fictional `555-0100` through `555-0199` phone numbers;
+  and `example.com` emails. Names, addresses, providers, reasons, and identifiers
+  are generated demo fixtures, not real patient information.
+- An `is_demo: true` flag and `demo_dataset: "hospital-referrals-demo-v1"` marker
+  on every clinic/patient document.
+
+**Deterministic dates:** the default reference time is fixed at
+`2026-11-18T12:00:00.000Z`, so the same seed produces the same dataset on reruns.
+“Future” and “past” appointments are relative to that reference time.
+For a later presentation, explicitly set a current reference time and reuse it
+for repeatable reruns:
+
+```sh
+npm run seed:demo -- --seed=42 --as-of=2026-12-01T12:00:00Z
+```
+
+All data is validated before any document is uploaded. Both container partition
+keys are checked before the first write. Clinics upload first, then patients,
+and the script prints referral counts by status.
+
+**Safe reruns:** readable IDs stay fixed (`clinic_001`–`clinic_010`,
+`patient_001`–`patient_100`, and globally unique nested referral IDs).
+Upserts replace documents with those IDs, including any edits made to them;
+other document IDs are untouched. Use dedicated demo containers and do not
+reuse these IDs for non-demo records. Changing the seed/reference time updates
+the same demo records instead of appending duplicates. Uploads are not a
+cross-container transaction: if one fails, the script exits unsuccessfully and
+may leave partial progress. Fix the issue and rerun with the same arguments.
+There is deliberately no reset/delete option.
+
+This referral dataset is separate from the voice app's current
+`synthetic-frontdesk` aggregate. Seeding it does **not** make the voice agent
+read these patients or clinics; integrating that schema is a separate step.
+
 ## Boundaries and next steps
 
 - **Not production-ready or a claim of HIPAA compliance.** Before real use:
