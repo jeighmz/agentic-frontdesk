@@ -211,11 +211,14 @@ test("Cosmos applies preferred windows before TOP 3 and rejects results outside 
   await assert.rejects(readAvailableSlots(reader([outside]), clinic.id, referral.service, now, windows));
 });
 
-test("natural-language preferences and slot selections still require deterministic confirmation", async (t) => {
+test("natural-language preferences and slot selections require a separate clear confirmation", async (t) => {
   const contexts: import("./referral-interpreter.ts").ReferralContext[] = [];
   const f = fixture({
     async interpret(context) {
       contexts.push(context);
+      if (context.pendingConfirmation) {
+        return { action: "confirm_booking" };
+      }
       return context.speech.includes("Friday")
         ? { action: "availability", date: "2026-11-20", period: "afternoon" }
         : { action: "choose_slot", choice: 2 };
@@ -235,16 +238,102 @@ test("natural-language preferences and slot selections still require determinist
   const proposal = await f.handler.handle("call", 3, "The second appointment works for me");
   assert.match(proposal.reply.message, /Say yes to confirm/);
   assert.equal(booking.mock.callCount(), 0);
-  assert.match((await f.handler.handle("call", 4, "Sounds great")).reply.message, /Say yes to confirm/);
+  assert.match((await f.handler.handle("call", 4, "Maybe, I'm not sure")).reply.message, /Say yes to confirm/);
   assert.equal(contexts.length, 2);
   assert.deepEqual(contexts[1]?.preference, { date: "2026-11-20", period: "afternoon" });
   assert.equal(booking.mock.callCount(), 0);
-  assert.match((await f.handler.handle("call", 5, "yes")).reply.message, /Your demo appointment is booked/);
+  assert.match((await f.handler.handle("call", 5, "Yes, that time works for me")).reply.message, /Your demo appointment is booked/);
+  assert.deepEqual(contexts[2]?.pendingConfirmation, {
+    localTime: contexts[1]?.slots[1]?.localTime, submitted: false,
+  });
   assert.equal(booking.mock.callCount(), 1);
   assert.equal(f.records.get(f.patient.id)?.referrals[0]?.scheduling.appointment_at, expected.starts_at);
   for (const privateField of [f.patient.id, f.patient.phone, f.patient.email, f.referral.reason]) {
     assert.ok(!JSON.stringify(contexts).includes(privateField));
   }
+});
+
+test("natural confirmation replay submits the same proposed appointment only once", async (t) => {
+  t.mock.method(console, "log", () => {});
+  let interpretations = 0;
+  const f = fixture({
+    async interpret(context) {
+      interpretations += 1;
+      assert.ok(context.pendingConfirmation);
+      return { action: "confirm_booking" };
+    },
+  });
+  const booking = t.mock.method(f.store, "book");
+  await f.handler.handle("call", 0, "");
+  await f.handler.handle("call", 1, f.patient.id);
+  await f.handler.handle("call", 2, "book option one");
+  const [first, replay] = await Promise.all([
+    f.handler.handle("call", 3, "Sounds good, please book it"),
+    f.handler.handle("call", 3, "Sounds good, please book it"),
+  ]);
+  assert.match(first.reply.message, /Your demo appointment is booked/);
+  assert.deepEqual(replay, first);
+  assert.equal(interpretations, 1);
+  assert.equal(booking.mock.callCount(), 1);
+});
+
+test("natural rejection, conditional answers and requests for another slot do not confirm a booking", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const replies: { speech: string; intent: import("./referral-interpreter.ts").ReferralIntent }[] = [
+    { speech: "Please do not book that appointment", intent: { action: "decline_booking" } },
+    { speech: "What time was that again?", intent: { action: "clarify" } },
+    { speech: "Yes, but could it be later?", intent: { action: "clarify" } },
+    { speech: "If I say yes, would you book it?", intent: { action: "confirm_booking" } },
+    { speech: "Maybe that works", intent: { action: "confirm_booking" } },
+    { speech: "Actually, the second option", intent: { action: "choose_slot", choice: 2 } },
+  ];
+  for (const { speech, intent } of replies) {
+    const f = fixture({ async interpret() { return intent; } });
+    const booking = t.mock.method(f.store, "book");
+    const original = structuredClone(f.patient);
+    await f.handler.handle("call", 0, "");
+    await f.handler.handle("call", 1, f.patient.id);
+    await f.handler.handle("call", 2, "book option one");
+    const reply = await f.handler.handle("call", 3, speech);
+    assert.equal(booking.mock.callCount(), 0);
+    assert.deepEqual(f.records.get(f.patient.id), original);
+    if (intent.action === "decline_booking") {
+      assert.match(reply.reply.message, /discarded/);
+    } else {
+      assert.match(reply.reply.message, /Say yes to confirm/);
+      await f.handler.handle("call", 4, "yes");
+      assert.equal(booking.mock.callCount(), 1);
+      const request = booking.mock.calls[0]?.arguments[0];
+      assert.ok(request);
+      const firstSlot = f.slots.find((slot) => slot.service === f.referral.service);
+      assert.equal(request.slotId, firstSlot?.id);
+    }
+  }
+});
+
+test("model confirmation actions cannot book without a pending proposal", async (t) => {
+  for (const action of ["confirm_booking", "decline_booking"] as const) {
+    const f = fixture({ async interpret() { return { action }; } });
+    const booking = t.mock.method(f.store, "book");
+    await f.handler.handle("call", 0, "");
+    await f.handler.handle("call", 1, f.patient.id);
+    const reply = await f.handler.handle("call", 2, "Sure, let's do that");
+    assert.match(reply.reply.message, /no appointment awaiting confirmation/);
+    assert.equal(booking.mock.callCount(), 0);
+  }
+});
+
+test("confirmation interpretation failures never fall back to booking", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const f = fixture({ async interpret() { throw new Error("Classifier unavailable"); } });
+  const booking = t.mock.method(f.store, "book");
+  await f.handler.handle("call", 0, "");
+  await f.handler.handle("call", 1, f.patient.id);
+  await f.handler.handle("call", 2, "book option one");
+  await assert.rejects(f.handler.handle("call", 3, "Yes, that works for me"), /Classifier unavailable/);
+  assert.equal(booking.mock.callCount(), 0);
+  assert.match((await f.handler.handle("call", 3, "yes")).reply.message, /Your demo appointment is booked/);
+  assert.equal(booking.mock.callCount(), 1);
 });
 
 test("model choices not actually offered cannot book, and interpreter failures propagate", async (t) => {
@@ -436,7 +525,12 @@ test("patient changes clear old offered choices, and stale referrals cannot be b
 });
 
 test("uncertain confirmations retain the request and do not claim that no booking occurred", async (t) => {
-  const { handler, patient, store } = fixture();
+  const { handler, patient, store } = fixture({
+    async interpret(context) {
+      assert.equal(context.pendingConfirmation?.submitted, true);
+      return { action: context.speech.includes("check") ? "confirm_booking" : "decline_booking" };
+    },
+  });
   const requests: string[] = [];
   t.mock.method(store, "book", async (request: BookingRequest) => {
     requests.push(request.bookingId);
@@ -450,7 +544,10 @@ test("uncertain confirmations retain the request and do not claim that no bookin
   assert.match(decline.reply.message, /may already have booked/);
   assert.equal(decline.reply.end, false);
   assert.doesNotMatch(decline.reply.message, /No appointment was booked|discarded/);
-  await assert.rejects(handler.handle("call", 4, "yes"), /Unknown write outcome/);
+  const naturalDecline = await handler.handle("call", 4, "Please do not book it after all");
+  assert.match(naturalDecline.reply.message, /may already have booked/);
+  assert.equal(requests.length, 1);
+  await assert.rejects(handler.handle("call", 5, "Please check that same booking"), /Unknown write outcome/);
   assert.equal(requests.length, 2);
   assert.equal(requests[0], requests[1]);
 });

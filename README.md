@@ -367,7 +367,9 @@ continues to work as before.
   name to switch patients, or **"staff"** to use the configured handoff.
 - Say **"book option one"**, **"book option two"**, or **"option three"** using
   an offered choice. The bot repeats the service, clinic, date, time, and duration.
-  Nothing is reserved until you say **"yes"** or **"confirm"**.
+  Nothing is reserved until a separate confirmation. **"Yes"** or **"confirm"**
+  always works; with referral AI enabled, a clear natural-language approval such
+  as **"yes, that time works for me"** works too.
 - Before confirmation, **"no"** discards the proposal without writing anything.
   Decline first if you want to switch patients or referrals.
 - On confirmation, the app conditionally claims the slot in `appointment_slots`
@@ -475,17 +477,27 @@ are not supported in this first interpreter; use a date and a day period instead
 
 The model returns one validated intent, not spoken medical advice or a booking
 result. It cannot supply document IDs, write Cosmos, or bypass offered choices.
-Selecting a time only proposes it. While confirmation is pending, the model is
-not called: say **"yes"** / **"confirm"** or **"no"** explicitly. Existing booking
+Selecting a time only proposes it. Simple **"yes"** / **"confirm"** and **"no"**
+responses are handled locally. With referral AI enabled, other responses are
+classified against the single pending appointment: **"sounds good, please book
+it"** can approve it, while **"please don't book that"** discards an unsubmitted
+proposal. Questions, uncertainty, conditional approvals, and requests to change
+the time repeat the confirmation without making changes. Confirmation cannot
+select a different slot or act without a pending proposal. A rejection after an
+uncertain write cannot undo or claim to undo that write. Existing booking
 ownership, replay, and recovery protections remain in application code.
+Conditional/uncertainty markers such as **"if"**, **"yes, but"**, and **"maybe"**
+trigger a local clarification rather than asking the model for approval.
 
 Only the current utterance, local date/time zone, selection-state flags/counts,
-and offered option numbers/times go to Azure OpenAI. Patient documents, contact
+offered option numbers/times, and the pending appointment's time/submission flag
+go to Azure OpenAI. Patient documents, contact
 details, referral reasons, credentials, and raw call identifiers are not sent.
 An utterance can itself contain a fictional name: never use real patient data.
 Model errors/refusals/timeouts use the existing uncertainty/handoff path;
 there is no silent model-error fallback or model-generated success claim.
-Exact commands and confirmation do not need a model request.
+Exact commands and simple yes/no confirmations do not need a model request;
+natural-language confirmations use the same bounded Azure interpreter.
 
 **Cost controls:** each model request allows at most 256 output tokens, has a
 five-second timeout, and disables SDK retries. Configure deployment token/rate

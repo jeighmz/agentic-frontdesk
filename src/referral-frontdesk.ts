@@ -4,7 +4,7 @@ import { availabilityWindows, type AppointmentSlot, type AvailabilityPreference,
 import type { BookingRequest, BookingResult } from "./booking.ts";
 import type { Reply, VoiceHandler } from "./domain.ts";
 import { CLINIC_TIME_ZONE, isSchedulableReferral, normalizePatientFullName, type Patient, type Referral } from "./referral-models.ts";
-import { referralIntentSchema, type ReferralInterpreter } from "./referral-interpreter.ts";
+import { referralIntentSchema, type ReferralIntent, type ReferralInterpreter } from "./referral-interpreter.ts";
 import type { ReferralStore } from "./referral-store.ts";
 
 type PendingBooking = { request: BookingRequest; slot: AppointmentSlot; clinicName: string; submitted: boolean };
@@ -131,19 +131,27 @@ export class ReferralFrontdesk implements VoiceHandler {
 
   private async respond(session: Session, speech: string, now: number): Promise<Reply> {
     if (/\b(staff|human|operator|emergency)\b/i.test(speech)) {
-      session.pending = null;
-      session.offered = null;
-      return say("I will try to connect you to staff. For an emergency, call your local emergency number.", true);
+      return this.handoff(session);
     }
     if (session.pending) {
-      if (/^(yes|yes please|confirm|book it)[.!?]*$/i.test(speech)) {
+      const answer = speech.toLowerCase().replace(/[.!?,]/g, "").trim().replace(/\s+/g, " ");
+      const needsClarification = /\b(if|unless|maybe|perhaps|but|instead)\b|\bnot\s+sure\b/i.test(speech);
+      let action: "confirm_booking" | "decline_booking" | "clarify" = "clarify";
+      if (["yes", "yes please", "confirm", "book it"].includes(answer)) action = "confirm_booking";
+      else if (["no", "no thanks", "no thank you", "cancel", "never mind"].includes(answer)) action = "decline_booking";
+      else if (speech && !needsClarification && this.interpreter) {
+        const intent = await this.interpret(session, speech, now);
+        if (intent.action === "handoff") return this.handoff(session);
+        if (intent.action === "confirm_booking" || intent.action === "decline_booking") action = intent.action;
+      }
+      if (action === "confirm_booking") {
         session.pending.submitted = true;
         return this.bookingReply(session, await this.store.book(session.pending.request));
       }
       if (session.pending.submitted) {
         return say("Your earlier confirmation may already have booked the slot. I cannot discard it until its result is verified. Say yes to check the same booking, or staff.");
       }
-      if (/^(no|no thanks|cancel|never mind)[.!?]*$/i.test(speech)) {
+      if (action === "decline_booking") {
         session.pending = null;
         return say("The proposed booking was discarded. No appointment was booked. Say availability to refresh or choose another offered option.");
       }
@@ -177,17 +185,11 @@ export class ReferralFrontdesk implements VoiceHandler {
       || selection(speech.replace(/^(book|reserve)\s+/i, ""), "option", 3) !== null
       || /^(availability|available|appointments?|repeat)[.!?]*$/i.test(speech);
     if (this.interpreter && !directCommand) {
-      const intent = referralIntentSchema.parse(await this.interpreter.interpret({
-        speech,
-        localDate: Temporal.Instant.fromEpochMilliseconds(now).toZonedDateTimeISO(CLINIC_TIME_ZONE).toPlainDate().toString(),
-        timeZone: CLINIC_TIME_ZONE,
-        patientSelected: session.patientId !== null,
-        referralSelected: session.selectedReferralId !== null,
-        referralCount: session.referralIds.length,
-        preference: { ...session.preference },
-        slots: session.offered?.slots.map((slot, index) => ({ option: index + 1, localTime: this.describeSlot(slot) })) ?? [],
-      }));
+      const intent = await this.interpret(session, speech, now);
       switch (intent.action) {
+        case "confirm_booking":
+        case "decline_booking":
+          return say("There is no appointment awaiting confirmation. Choose an offered option first, for example book option one.");
         case "patient_number":
           speech = `patient ${intent.patientNumber}`;
           break;
@@ -215,8 +217,7 @@ export class ReferralFrontdesk implements VoiceHandler {
           speech = "availability";
           break;
         case "handoff":
-          session.offered = null;
-          return say("I will try to connect you to staff. For an emergency, call your local emergency number.", true);
+          return this.handoff(session);
         case "unsupported":
           return say("Rescheduling and appointment cancellation are not enabled yet. Say availability or staff.");
         case "clarify":
@@ -290,6 +291,29 @@ export class ReferralFrontdesk implements VoiceHandler {
       return say("That referral is no longer active or available. Say the patient number again to refresh the referral list.");
     }
     return this.describeReferral(session, referral, now);
+  }
+
+  private handoff(session: Session): Reply {
+    session.pending = null;
+    session.offered = null;
+    return say("I will try to connect you to staff. For an emergency, call your local emergency number.", true);
+  }
+
+  private async interpret(session: Session, speech: string, now: number): Promise<ReferralIntent> {
+    if (!this.interpreter) throw new Error("Natural-language interpretation is not configured");
+    return referralIntentSchema.parse(await this.interpreter.interpret({
+      speech,
+      localDate: Temporal.Instant.fromEpochMilliseconds(now).toZonedDateTimeISO(CLINIC_TIME_ZONE).toPlainDate().toString(),
+      timeZone: CLINIC_TIME_ZONE,
+      patientSelected: session.patientId !== null,
+      referralSelected: session.selectedReferralId !== null,
+      referralCount: session.referralIds.length,
+      preference: { ...session.preference },
+      pendingConfirmation: session.pending ? {
+        localTime: this.describeSlot(session.pending.slot), submitted: session.pending.submitted,
+      } : null,
+      slots: session.offered?.slots.map((slot, index) => ({ option: index + 1, localTime: this.describeSlot(slot) })) ?? [],
+    }));
   }
 
   private async selectPatient(session: Session, patient: Patient, now: number): Promise<Reply> {

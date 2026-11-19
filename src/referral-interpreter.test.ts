@@ -20,6 +20,7 @@ const context: ReferralContext = {
   localDate: "2026-11-18", timeZone: "America/New_York",
   patientSelected: true, referralSelected: true, referralCount: 1,
   preference: { date: null, period: null },
+  pendingConfirmation: null,
   slots: [{ option: 1, localTime: "Thursday at 9 AM" }, { option: 2, localTime: "Thursday at 9:30 AM" }],
 };
 const intent: ReferralIntent = {
@@ -69,7 +70,7 @@ test("Azure routing uses a single bounded function decision, not model-generated
   assert.equal(azureStop.requests.length, 1);
 });
 
-test("malformed, truncated, fabricated and confirmation tool decisions are rejected", async () => {
+test("malformed, truncated, fabricated and unknown tool decisions are rejected", async () => {
   for (const response of [
     completion({ ...intent, choice: 4 }),
     completion({ ...intent, action: "confirm" }),
@@ -83,6 +84,18 @@ test("malformed, truncated, fabricated and confirmation tool decisions are rejec
   ]) {
     const { planner } = interpreter(response);
     await assert.rejects(planner.interpret(context));
+  }
+});
+
+test("Azure adapter accepts natural confirmation decisions with pending appointment context", async () => {
+  for (const action of ["confirm_booking", "decline_booking", "clarify"] as const) {
+    const { planner } = interpreter(completion({ action }));
+    assert.deepEqual(await planner.interpret({
+      ...context,
+      speech: action === "confirm_booking" ? "Yes, that time works for me"
+        : action === "decline_booking" ? "Please do not book that" : "Maybe, can it be later?",
+      pendingConfirmation: { localTime: "Thursday at 9:30 AM", submitted: false },
+    }), { action });
   }
 });
 
