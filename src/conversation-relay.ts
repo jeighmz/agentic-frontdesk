@@ -15,7 +15,7 @@ const messageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("setup"), callSid: callSidSchema, accountSid: z.string().regex(/^AC[0-9a-f]{32}$/i) }),
   z.object({ type: z.literal("prompt"), voicePrompt: z.string().max(2000), last: z.boolean() }),
   z.object({ type: z.literal("interrupt") }),
-  z.object({ type: z.literal("info") }),
+  z.object({ type: z.literal("info"), name: z.string().optional(), value: z.unknown().optional() }),
   z.object({ type: z.literal("error") }),
 ]);
 type Call = {
@@ -31,8 +31,10 @@ type Call = {
   messages: number;
   socket: WebSocket | null;
   reply: Reply;
+  draining: { reply: Reply; played: string; expected: string; reason: "ended" | "provider_error" } | null;
   deadline: ReturnType<typeof setTimeout>;
   setupTimer: ReturnType<typeof setTimeout>;
+  playbackTimer?: ReturnType<typeof setTimeout>;
   cleanupTimer?: ReturnType<typeof setTimeout>;
 };
 type LimitCall = (accountSid: string, callSid: string, seconds: number) => Promise<void>;
@@ -62,11 +64,10 @@ export class ConversationRelay {
 
   start(callId: string): string {
     const voice = new twilio.twiml.VoiceResponse();
-    if (this.active?.id === callId && !this.active.ending) return this.connectXml(this.active);
+    if (this.active?.id === callId && !this.active.ending && !this.active.draining) return this.connectXml(this.active);
     if (this.closed || this.active || this.seen.has(callId)) {
       log("warn", "relay_call_rejected", { reason: "capacity" });
-      voice.say({ voice: "Google.en-US-Neural2-F" }, "This demo is busy or this call has already ended. Please call again later. Goodbye.");
-      voice.hangup();
+      voice.reject({ reason: "busy" });
       return voice.toString();
     }
     this.seen.add(callId);
@@ -78,6 +79,7 @@ export class ConversationRelay {
       id: callId, ticket: randomUUID(), requestId: requestContext.getStore()?.requestId ?? randomUUID(),
       turn: 0, setup: false, providerLimited: false, busy: false, busyNotice: false, ending: false, messages: 0, socket: null,
       reply: ended("The real-time voice connection ended. If you were booking, ask staff to verify its status before trying again. Goodbye."),
+      draining: null,
       deadline: setTimeout(() => this.end(call, ended(
         "The five-minute demo call limit has been reached. If you were booking, ask staff to verify its status before trying again. Goodbye.",
       ), "duration_limit"), RELAY_LIMITS.maxCallSeconds * 1000),
@@ -153,6 +155,7 @@ export class ConversationRelay {
       interruptible: "speech", preemptible: false, partialPrompts: false,
       reportInputDuringAgentSpeech: true, echoPromptFiltering: true,
       applicationReconnect: false, elevenlabsTextNormalization: "on",
+      events: "tokens-played",
     });
     voice.hangup();
     return voice.toString();
@@ -176,6 +179,15 @@ export class ConversationRelay {
       return;
     }
     if (!call.setup) throw new Error("Relay setup is required before speech");
+    if (call.draining) {
+      if (message.type === "info" && message.name === "tokensPlayed" && typeof message.value === "string") {
+        const draining = call.draining;
+        // Match the entire final utterance, not a completion event for earlier speech.
+        draining.played = (draining.played + message.value.replace(/\s/g, "")).slice(-draining.expected.length);
+        if (draining.played === draining.expected) this.end(call, draining.reply, draining.reason);
+      }
+      return;
+    }
     if (message.type !== "prompt" || !message.last) return;
     if (call.busy) {
       log("warn", "relay_input_rejected", { reason: "busy" });
@@ -194,12 +206,29 @@ export class ConversationRelay {
       const result = await this.frontdesk.handle(call.id, call.turn, speech);
       if (this.active !== call || call.ending) return;
       call.turn = result.turn;
-      if (result.reply.end || result.reply.transfer) this.end(call, result.reply, "ended");
+      if (result.reply.end || result.reply.transfer) this.speakEnd(call, result.reply, "ended");
       else this.send(call, { type: "text", token: result.reply.message, last: true, interruptible: call.turn > 1 });
+    } catch (error) {
+      log("error", "relay_session_failed", { error: errorDetails(error) });
+      this.speakEnd(call, voiceFailureReply(error), "provider_error");
     } finally {
       call.busy = false;
       call.busyNotice = false;
     }
+  }
+
+  private speakEnd(call: Call, reply: Reply, reason: "ended" | "provider_error"): void {
+    if (this.active !== call || call.ending || call.draining) return;
+    if (reply.transfer && !this.config.STAFF_PHONE_NUMBER) {
+      reply = ended(`${reply.message} Staff transfer is not configured for this demo. No staff member has been contacted. Goodbye.`);
+    }
+    call.draining = { reply, played: "", expected: reply.message.replace(/\s/g, ""), reason };
+    call.playbackTimer = setTimeout(() => {
+      log("warn", "relay_session_failed", { reason: "playback_timeout" });
+      this.end(call, ended("Final speech could not be verified. Ask staff to verify any booking before trying again."), "playback_timeout");
+    }, 30_000);
+    call.playbackTimer.unref();
+    this.send(call, { type: "text", token: reply.message, last: true, interruptible: false, preemptible: false });
   }
 
   private send(call: Call, message: object): void {
@@ -210,16 +239,23 @@ export class ConversationRelay {
 
   private fail(call: Call, error: unknown): void {
     log("error", "relay_session_failed", { error: errorDetails(error) });
+    // A failure during final speech must never escalate to a transfer or more speech.
+    if (call.draining) {
+      this.end(call, ended("Final speech could not be verified. Ask staff to verify any booking before trying again."), "provider_error");
+      return;
+    }
     this.end(call, call.providerLimited ? voiceFailureReply(error)
       : ended("The real-time voice connection could not be established. Please contact the hospital directly. Goodbye."), "provider_error");
   }
 
-  private end(call: Call, reply: Reply, reason: "duration_limit" | "setup_timeout" | "transport_closed" | "ended" | "provider_error"): void {
+  private end(call: Call, reply: Reply, reason: "duration_limit" | "setup_timeout" | "transport_closed" | "ended" | "provider_error" | "playback_timeout"): void {
     if (this.active !== call || call.ending) return;
     call.ending = true;
     call.reply = reply;
+    call.draining = null;
     clearTimeout(call.deadline);
     clearTimeout(call.setupTimer);
+    clearTimeout(call.playbackTimer);
     log("info", "relay_session_ended", { reason });
     this.send(call, { type: "end", handoffData: JSON.stringify({ reason }) });
     call.cleanupTimer = setTimeout(() => this.release(call), 5_000);
@@ -229,6 +265,7 @@ export class ConversationRelay {
   private release(call: Call): void {
     clearTimeout(call.deadline);
     clearTimeout(call.setupTimer);
+    clearTimeout(call.playbackTimer);
     clearTimeout(call.cleanupTimer);
     call.ending = true;
     call.socket?.terminate();

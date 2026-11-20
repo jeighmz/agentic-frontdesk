@@ -828,11 +828,14 @@ test("realtime referral booking retains natural confirmation, one write and the 
   assert.match((await say("Sounds good, please book it")).token, /Your demo appointment is booked.*anything else/);
   assert.equal(booking.mock.callCount(), 1);
   assert.equal(f.records.get(f.patient.id)?.referrals[0]?.status, "scheduled");
-  assert.equal((await say("No, thank you")).type, "end");
+  const goodbye = await say("No, thank you");
+  assert.equal(goodbye.type, "text");
+  assert.match(goodbye.token, /Thank you for calling.*Goodbye/);
+  assert.equal(goodbye.interruptible, false);
+  assert.equal((await exchange({ type: "info", name: "tokensPlayed", value: goodbye.token })).type, "end");
   const callback = new URL(actionUrl);
   const farewell = await post(`${callback.pathname}${callback.search}`);
-  assert.match(farewell, /Thank you for calling.*Goodbye/);
   assert.match(farewell, /<Hangup\s*\/>/);
-  assert.doesNotMatch(farewell, /<Gather/);
+  assert.doesNotMatch(farewell, /<Gather|<Say/);
   assert.equal(booking.mock.callCount(), 1);
 });

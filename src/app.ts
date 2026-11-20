@@ -16,20 +16,29 @@ const turnSchema = z.string().regex(/^\d{1,3}$/).transform(Number);
 
 function voiceXml(config: Config, response: Reply, callTurn: number): string {
   const voice = new twilio.twiml.VoiceResponse();
-  const sayOptions = config.VOICE_TRANSPORT === "relay" ? { voice: "Google.en-US-Neural2-F" as const } : {};
+  if (config.VOICE_TRANSPORT === "relay") {
+    if (response.transfer && config.STAFF_PHONE_NUMBER) {
+      voice.dial({
+        timeout: 20, timeLimit: RELAY_LIMITS.maxCallSeconds,
+        action: `${config.PUBLIC_BASE_URL}/voice/handoff`, method: "POST",
+      }, config.STAFF_PHONE_NUMBER);
+    } else {
+      voice.hangup();
+    }
+    return voice.toString();
+  }
   if (response.transfer) {
-    voice.say(sayOptions, response.message);
+    voice.say(response.message);
     if (config.STAFF_PHONE_NUMBER) {
       voice.dial({
         timeout: 20, action: `${config.PUBLIC_BASE_URL}/voice/handoff`, method: "POST",
-        ...(config.VOICE_TRANSPORT === "relay" ? { timeLimit: RELAY_LIMITS.maxCallSeconds } : {}),
       }, config.STAFF_PHONE_NUMBER);
     } else {
-      voice.say(sayOptions, "Staff transfer is not configured for this demo. No staff member has been contacted. Goodbye.");
+      voice.say("Staff transfer is not configured for this demo. No staff member has been contacted. Goodbye.");
       voice.hangup();
     }
   } else if (response.end) {
-    voice.say(sayOptions, response.message);
+    voice.say(response.message);
     voice.hangup();
   } else {
     const gather = voice.gather({
@@ -129,9 +138,14 @@ export function createApp(config: Config, frontdesk: VoiceHandler, relay?: Conve
   });
   app.post("/voice/handoff", (request, response) => {
     const voice = new twilio.twiml.VoiceResponse();
-    voice.say(config.VOICE_TRANSPORT === "relay" ? { voice: "Google.en-US-Neural2-F" } : {}, request.body?.DialCallStatus === "completed"
+    const completed = request.body?.DialCallStatus === "completed";
+    if (config.VOICE_TRANSPORT === "relay") {
+      log(completed ? "info" : "warn", "relay_handoff_ended", { reason: completed ? "ended" : "handoff_failed" });
+    } else {
+      voice.say(completed
       ? "The staff call has ended. Goodbye."
       : "I could not complete the staff transfer. Please contact the hospital directly. For an emergency, call your local emergency number.");
+    }
     voice.hangup();
     response.type("text/xml").send(voice.toString());
   });

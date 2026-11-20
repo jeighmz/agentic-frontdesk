@@ -18,7 +18,7 @@ const callId = `CA${"a".repeat(32)}`;
 const accountId = `AC${"b".repeat(32)}`;
 const outboundSchema = z.object({
   type: z.enum(["text", "end"]), token: z.string().optional(), last: z.boolean().optional(),
-  interruptible: z.boolean().optional(), handoffData: z.string().optional(),
+  interruptible: z.boolean().optional(), preemptible: z.boolean().optional(), handoffData: z.string().optional(),
 });
 type Message = z.infer<typeof outboundSchema>;
 
@@ -110,7 +110,12 @@ async function fixture(t: TestContext, options: {
       return message ? Promise.resolve(message) : new Promise<Message>((resolve, reject) => waiting.push({ resolve, reject }));
     };
     const send = (message: object) => ws.send(JSON.stringify(message));
-    return { ws, next, send, buffered };
+    const flush = async () => {
+      const pong = once(ws, "pong");
+      ws.ping();
+      await pong;
+    };
+    return { ws, next, send, buffered, flush };
   }
   const setup = { type: "setup", callSid: callId, accountSid: accountId };
   return { config, relay, store, calls, limits, logs, origin, post, reserve, reservation, connect, setup };
@@ -133,11 +138,12 @@ test("signed relay admission is replay-safe, uses ElevenLabs and permits only on
   assert.match(first.xml, /ttsProvider="ElevenLabs"/);
   assert.match(first.xml, /voice="21m00Tcm4TlvDq8ikWAM-v4"/);
   assert.match(first.xml, /applicationReconnect="false"/);
+  assert.match(first.xml, /events="tokens-played"/);
   assert.equal((await f.reserve()).xml, first.xml);
   const other = await f.post("/voice", { CallSid: `CA${"c".repeat(32)}` });
   const busy = await other.text();
-  assert.match(busy, /<Hangup\s*\/>/);
-  assert.doesNotMatch(busy, /ConversationRelay/);
+  assert.match(busy, /<Reject reason="busy"\s*\/>/);
+  assert.doesNotMatch(busy, /ConversationRelay|<Say/);
   assert.equal(f.calls.length, 0);
   assert.equal(f.limits.length, 0);
   const rejected = new WebSocket(`${f.origin.replace(/^http:/, "ws:")}${first.path}`);
@@ -171,6 +177,22 @@ test("live text turns preserve explicit booking confirmation, interruption safet
   assert.match((await c.next()).token ?? "", /is booked/);
   assert.equal((await f.store.load()).state.appointments.length, 2);
   c.send({ type: "prompt", voicePrompt: "staff", last: true });
+  const transfer = await c.next();
+  assert.equal(transfer.type, "text");
+  assert.ok(transfer.token);
+  assert.equal(transfer.interruptible, false);
+  assert.equal(transfer.preemptible, false);
+  c.send({ type: "info", name: "agentSpeaking", value: "off" });
+  c.send({ type: "info", name: "tokensPlayed", value: "Earlier speech has finished. Goodbye." });
+  c.send({ type: "prompt", voicePrompt: "yes", last: true });
+  const split = Math.floor(transfer.token.length / 2);
+  c.send({ type: "info", name: "tokensPlayed", value: transfer.token.slice(0, split) });
+  await c.flush();
+  assert.equal(c.buffered.length, 0);
+  assert.equal(f.calls.length, 4);
+  const busy = await (await f.post("/voice", { CallSid: `CA${"c".repeat(32)}` })).text();
+  assert.match(busy, /<Reject reason="busy"/);
+  c.send({ type: "info", name: "tokensPlayed", value: transfer.token.slice(split) });
   const end = await c.next();
   assert.equal(end.type, "end");
   assert.deepEqual(JSON.parse(end.handoffData ?? "{}"), { reason: "ended" });
@@ -178,9 +200,15 @@ test("live text turns preserve explicit booking confirmation, interruption safet
   const xml = await callback.text();
   assert.match(xml, /<Dial[^>]*timeLimit="300"/);
   assert.match(xml, /\+15555550199/);
-  assert.doesNotMatch(xml, /<Gather/);
+  assert.doesNotMatch(xml, /<Gather|<Say/);
   const replay = await f.post(reserved.callback, { CallSid: callId });
-  assert.doesNotMatch(await replay.text(), /<Dial/);
+  assert.doesNotMatch(await replay.text(), /<Dial|<Say/);
+  for (const status of ["completed", "busy"]) {
+    const handoff = await (await f.post("/voice/handoff", { DialCallStatus: status })).text();
+    assert.match(handoff, /<Hangup\s*\/>/);
+    assert.doesNotMatch(handoff, /<Say|ConversationRelay/);
+  }
+  assert.match(f.logs.join(), /relay_handoff_ended.*handoff_failed/);
   assert.deepEqual(f.calls.map(({ speech }) => speech), ["", "book slot-2", "yes", "staff"]);
   assert.ok(!f.logs.join().includes("private partial transcript"));
   assert.ok(!f.logs.join().includes(callId));
@@ -223,7 +251,7 @@ test("failure to set Twilio's hard duration limit ends the relay before any fron
   assert.equal(f.calls.length, 0);
   const xml = await (await f.post(reserved.callback, { CallSid: callId })).text();
   assert.match(xml, /<Hangup\s*\/>/);
-  assert.doesNotMatch(xml, /<Dial|<Gather/);
+  assert.doesNotMatch(xml, /<Dial|<Gather|<Say/);
   assert.ok(!f.logs.join().includes(secret));
   assert.match(f.logs.join(), /"statusCode":403/);
 });
@@ -289,10 +317,84 @@ test("model-guard failures use an explicit terminal voice response instead of re
   const reserved = await f.reserve();
   const c = await f.connect(reserved);
   c.send(f.setup);
+  const warning = await c.next();
+  assert.equal(warning.type, "text");
+  assert.match(warning.token ?? "", /AI request limit/);
+  assert.match(warning.token ?? "", /No staff member has been contacted/);
+  assert.equal(warning.interruptible, false);
+  c.send({ type: "info", name: "tokensPlayed", value: warning.token });
   assert.equal((await c.next()).type, "end");
   const xml = await (await f.post(reserved.callback, { CallSid: callId })).text();
-  assert.match(xml, /AI request limit/);
   assert.match(xml, /<Hangup\s*\/>/);
-  assert.doesNotMatch(xml, /ConversationRelay|<Gather/);
+  assert.doesNotMatch(xml, /ConversationRelay|<Gather|<Say|<Dial/);
   assert.equal(f.calls.length, 1);
+});
+
+test("final playback cannot outlive its timeout or the original five-minute deadline", { timeout: 5000 }, async (t) => {
+  for (const limit of ["playback", "duration"]) {
+    await t.test(limit, async (t) => {
+      const f = await fixture(t, {
+        staff: "+15555550199",
+        handler: {
+          async handle(_id, turn) {
+            return { reply: { message: turn ? "Transferring you to staff." : "Welcome.", transfer: turn > 0, end: false }, turn: turn + 1 };
+          },
+        },
+      });
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      const reserved = f.reservation(f.relay.start(callId));
+      const c = await f.connect(reserved);
+      c.send(f.setup);
+      await c.next();
+      if (limit === "duration") t.mock.timers.tick(299_999);
+      c.send({ type: "prompt", voicePrompt: "staff", last: true });
+      assert.equal((await c.next()).type, "text");
+      if (limit === "playback") {
+        t.mock.timers.tick(29_999);
+        await c.flush();
+        assert.equal(c.buffered.length, 0);
+      }
+      t.mock.timers.tick(1);
+      const end = await c.next();
+      assert.equal(JSON.parse(end.handoffData ?? "{}").reason, limit === "playback" ? "playback_timeout" : "duration_limit");
+      const result = f.relay.finish(callId, new URL(reserved.socketUrl).searchParams.get("ticket") ?? "");
+      assert.equal(result.transfer, false);
+      assert.equal(result.end, true);
+      assert.equal(f.calls.length, 2);
+      assert.match(f.relay.start(`CA${"c".repeat(32)}`), /ConversationRelay/);
+      t.mock.timers.reset();
+    });
+  }
+});
+
+test("provider failure or disconnect during final speech cannot trigger a staff transfer or another voice", { timeout: 5000 }, async (t) => {
+  for (const failure of ["provider", "disconnect"]) {
+    await t.test(failure, async (t) => {
+      const f = await fixture(t, {
+        staff: "+15555550199",
+        handler: {
+          async handle() {
+            return { reply: { message: "Transferring you to staff.", transfer: true, end: false }, turn: 1 };
+          },
+        },
+      });
+      const reserved = await f.reserve();
+      const c = await f.connect(reserved);
+      c.send(f.setup);
+      assert.equal((await c.next()).type, "text");
+      if (failure === "provider") {
+        c.send({ type: "error", description: "private-provider-description" });
+        assert.equal((await c.next()).type, "end");
+      } else {
+        const closed = once(c.ws, "close");
+        c.ws.close();
+        await closed;
+      }
+      const xml = await (await f.post(reserved.callback, { CallSid: callId })).text();
+      assert.match(xml, /<Hangup\s*\/>/);
+      assert.doesNotMatch(xml, /<Dial|<Say|ConversationRelay/);
+      assert.equal(f.calls.length, 1);
+      assert.ok(!f.logs.join().includes("private-"));
+    });
+  }
 });

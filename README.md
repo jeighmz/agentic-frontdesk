@@ -555,7 +555,7 @@ from Azure model tokens; check your account's rates before testing.
 **Hard development limits:**
 
 - **One active real-time session per app process**, reserved before issuing
-  `<Connect>`. Additional calls hear a busy message and hang up, rather than
+  `<Connect>`. Additional calls receive a busy rejection, rather than
   starting another paid ConversationRelay session.
 - **Five minutes per call.** The app sets Twilio's call `timeLimit` to 300 seconds
   before running the front-desk handler, and independently ends the relay at five
@@ -569,16 +569,25 @@ from Azure model tokens; check your account's rates before testing.
   guards still apply. Interruptions stop speech playback, not booking writes.
   Speech received while a request is being checked is explicitly rejected with
   a repeat-after-response prompt, never queued into a later confirmation.
-- Final goodbyes, errors, busy responses and staff handoffs use a Google female
-  neural `<Say>` fallback outside the relay. This lets Twilio finish speaking
-  before hanging up/transferring, instead of cutting off the last ElevenLabs
-  utterance. Staff dial attempts are also bounded to five minutes.
+- All app speech, including hardcoded replies, goodbyes, handler errors, and
+  staff-transfer announcements, uses the configured ElevenLabs voice. Final
+  speech cannot be interrupted. The app waits for `tokensPlayed` events matching
+  the entire final utterance before ending/transferring, not merely an event
+  saying earlier speech stopped. This wait is capped at 30 seconds and never
+  extends the original five-minute deadline; missing confirmation aborts the
+  transfer, logs a failure, and ends the session.
+- There is **no fallback to another voice**. Admission rejects use a busy tone;
+  connection/provider failures end without an alternate spoken announcement.
+  When no staff number is configured, that explanation is spoken in ElevenLabs
+  before hanging up. After a staff dial attempt, the call hangs up without
+  another announcement; unsuccessful attempts are logged. Staff dial attempts
+  remain bounded to five minutes.
 
 These are **process-local/per-call limits, not a spending wallet**. Restarting
 or running more app processes allows more calls; repeated short calls still incur
 telephony charges. The limits don't prevent costly Azure provisioning. Set
 `VOICE_TRANSPORT=gather` and restart to restore the original voice flow. Relay
-failures end with an explicit error/handoff; they never silently restart the
+failures are logged and end the session; they never silently restart the
 conversation or claim an uncertain booking failed or succeeded.
 
 Only use synthetic data. Relay speech/text passes through Twilio, ElevenLabs and

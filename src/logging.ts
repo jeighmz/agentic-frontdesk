@@ -13,7 +13,7 @@ type Event =
   | "dependency_operation_started" | "dependency_operation_completed" | "dependency_operation_failed"
   | "llm_request_blocked"
   | "relay_call_rejected" | "relay_session_started" | "relay_session_ended"
-  | "relay_session_failed" | "relay_input_rejected";
+  | "relay_session_failed" | "relay_input_rejected" | "relay_handoff_ended";
 type Details = {
   operation?: Operation;
   mode?: "demo" | "cloud" | "referrals";
@@ -24,7 +24,8 @@ type Details = {
   speechPresent?: boolean;
   category?: "state_conflict" | "request_error";
   reason?: "invalid_signature" | "invalid_payload" | "capacity" | "busy"
-    | "duration_limit" | "setup_timeout" | "transport_closed" | "ended" | "provider_error";
+    | "duration_limit" | "setup_timeout" | "transport_closed" | "ended" | "provider_error"
+    | "playback_timeout" | "handoff_failed";
   limit?: "process" | "rate" | "concurrency";
   requestsUsed?: number;
   requestsRemaining?: number;
