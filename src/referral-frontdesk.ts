@@ -5,7 +5,10 @@ import type { BookingRequest, BookingResult } from "./booking.ts";
 import type { Reply, VoiceHandler } from "./domain.ts";
 import { CLINIC_TIME_ZONE, isSchedulableReferral, normalizePatientFullName, type Patient, type Referral } from "./referral-models.ts";
 import { referralIntentSchema, type ReferralIntent, type ReferralInterpreter } from "./referral-interpreter.ts";
+import { ModelUsageLimitError } from "./model-guard.ts";
 import type { ReferralStore } from "./referral-store.ts";
+
+export type CallContext = { patient: string | null; clinicId: string | null; service: string | null };
 
 type PendingBooking = { request: BookingRequest; slot: AppointmentSlot; clinicName: string; submitted: boolean };
 type Session = {
@@ -17,6 +20,7 @@ type Session = {
   pending: PendingBooking | null;
   awaitingMoreHelp: boolean;
   preference: AvailabilityPreference;
+  context: CallContext;
   reply: Reply;
   updatedAt: number;
 };
@@ -84,6 +88,11 @@ export class ReferralFrontdesk implements VoiceHandler {
     }
   }
 
+  context(callId: string): CallContext | null {
+    const session = this.calls.get(callId);
+    return session ? { ...session.context } : null;
+  }
+
   private async handleTurn(callId: string, turn: number, speech: string) {
     const now = this.now();
     for (const [id, session] of this.calls) {
@@ -97,6 +106,7 @@ export class ReferralFrontdesk implements VoiceHandler {
         turn: 1, patientId: null, referralIds: [], selectedReferralId: null,
         offered: null, pending: null, awaitingMoreHelp: false,
         preference: { date: null, period: null }, updatedAt: now,
+        context: { patient: null, clinicId: null, service: null },
         reply: say([
           "This is a fictional referral scheduling demo. Do not share personal or medical information.",
           "You can book a demo appointment after choosing a time and confirming. These are not real appointments.",
@@ -140,9 +150,9 @@ export class ReferralFrontdesk implements VoiceHandler {
       if (["yes", "yes please", "confirm", "book it"].includes(answer)) action = "confirm_booking";
       else if (["no", "no thanks", "no thank you", "cancel", "never mind"].includes(answer)) action = "decline_booking";
       else if (speech && !needsClarification && this.interpreter) {
-        const intent = await this.interpret(session, speech, now);
-        if (intent.action === "handoff") return this.handoff(session);
-        if (intent.action === "confirm_booking" || intent.action === "decline_booking") action = intent.action;
+        const intent = await this.tryInterpret(session, speech, now);
+        if (intent?.action === "handoff") return this.handoff(session);
+        if (intent?.action === "confirm_booking" || intent?.action === "decline_booking") action = intent.action;
       }
       if (action === "confirm_booking") {
         session.pending.submitted = true;
@@ -185,7 +195,10 @@ export class ReferralFrontdesk implements VoiceHandler {
       || selection(speech.replace(/^(book|reserve)\s+/i, ""), "option", 3) !== null
       || /^(availability|available|appointments?|repeat)[.!?]*$/i.test(speech);
     if (this.interpreter && !directCommand) {
-      const intent = await this.interpret(session, speech, now);
+      const intent = await this.tryInterpret(session, speech, now);
+      if (!intent) {
+        return say("Sorry, I did not catch that. You can say a demo patient number such as patient one, a fictional full name, availability, book option one, or staff.");
+      }
       switch (intent.action) {
         case "confirm_booking":
         case "decline_booking":
@@ -254,6 +267,7 @@ export class ReferralFrontdesk implements VoiceHandler {
       session.pending = null;
       session.awaitingMoreHelp = false;
       session.preference = { date: null, period: null };
+      session.context = { patient: null, clinicId: null, service: null };
       let patient: Patient | null;
       if (patientNumber !== null) {
         patient = await this.store.patient(`patient_${String(patientNumber).padStart(3, "0")}`);
@@ -299,6 +313,17 @@ export class ReferralFrontdesk implements VoiceHandler {
     return say("I will try to connect you to staff. For an emergency, call your local emergency number.", true);
   }
 
+  // Interpretation is read-only, so a failed or invalid model response can
+  // safely become a reprompt. Model-guard limits stay terminal by design.
+  private async tryInterpret(session: Session, speech: string, now: number): Promise<ReferralIntent | null> {
+    try {
+      return await this.interpret(session, speech, now);
+    } catch (error) {
+      if (error instanceof ModelUsageLimitError) throw error;
+      return null;
+    }
+  }
+
   private async interpret(session: Session, speech: string, now: number): Promise<ReferralIntent> {
     if (!this.interpreter) throw new Error("Natural-language interpretation is not configured");
     return referralIntentSchema.parse(await this.interpreter.interpret({
@@ -318,6 +343,10 @@ export class ReferralFrontdesk implements VoiceHandler {
 
   private async selectPatient(session: Session, patient: Patient, now: number): Promise<Reply> {
     session.patientId = patient.id;
+    session.context = {
+      patient: `${patient.first_name.trim().replace(/^Demo\s+(?=\S)/i, "")} ${patient.last_name.trim()}`,
+      clinicId: null, service: null,
+    };
     const referrals = patient.referrals.filter(isSchedulableReferral);
     session.referralIds = referrals.map((referral) => referral.referral_id);
     if (!referrals.length) return say("This demo patient has no active referrals awaiting scheduling. Say another patient number or fictional full name, or staff.");
@@ -333,6 +362,9 @@ export class ReferralFrontdesk implements VoiceHandler {
   }
 
   private async describeReferral(session: Session, referral: Referral, now: number): Promise<Reply> {
+    session.context = {
+      ...session.context, clinicId: referral.destination_clinic_id, service: referral.service,
+    };
     const intent = referral.scheduling.booking;
     if (intent?.state === "pending") {
       if (!session.patientId) throw new Error("Cannot resume a booking without a selected patient");

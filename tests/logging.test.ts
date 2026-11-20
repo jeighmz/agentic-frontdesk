@@ -3,10 +3,10 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { z } from "zod";
 import twilio from "twilio";
-import { createApp } from "./app.ts";
-import { readConfig } from "./config.ts";
-import { errorDetails, observeOperation, requestContext } from "./logging.ts";
-import { ModelUsageLimitError } from "./model-guard.ts";
+import { createApp } from "../src/app.ts";
+import { readConfig } from "../src/config.ts";
+import { errorDetails, observeOperation, requestContext } from "../src/logging.ts";
+import { ModelUsageLimitError } from "../src/model-guard.ts";
 
 test("error diagnostics expose safe Cosmos metadata but never arbitrary error content", () => {
   const secret = "sensitive-patient-and-credential-content";

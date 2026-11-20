@@ -55,10 +55,11 @@ function voiceXml(config: Config, response: Reply, callTurn: number): string {
   return voice.toString();
 }
 
-export function createApp(config: Config, frontdesk: VoiceHandler, relay?: ConversationRelay) {
+export function createApp(config: Config, frontdesk: VoiceHandler, relay?: ConversationRelay, monitor?: express.Router) {
   if (config.VOICE_TRANSPORT === "relay" && !relay) throw new Error("ConversationRelay transport must be attached");
   const app = express();
   app.disable("x-powered-by");
+  if (monitor) app.use("/monitor", monitor);
   app.get("/healthz", (_request, response) => {
     response.json({ status: "ok", mode: config.MODE, syntheticDataOnly: true, voiceTransport: config.VOICE_TRANSPORT });
   });
@@ -143,8 +144,8 @@ export function createApp(config: Config, frontdesk: VoiceHandler, relay?: Conve
       log(completed ? "info" : "warn", "relay_handoff_ended", { reason: completed ? "ended" : "handoff_failed" });
     } else {
       voice.say(completed
-      ? "The staff call has ended. Goodbye."
-      : "I could not complete the staff transfer. Please contact the hospital directly. For an emergency, call your local emergency number.");
+        ? "The staff call has ended. Goodbye."
+        : "I could not complete the staff transfer. Please contact the hospital directly. For an emergency, call your local emergency number.");
     }
     voice.hangup();
     response.type("text/xml").send(voice.toString());
@@ -154,7 +155,12 @@ export function createApp(config: Config, frontdesk: VoiceHandler, relay?: Conve
       category: error instanceof StateConflict ? "state_conflict" : "request_error",
       error: errorDetails(error),
     });
-    response.status(200).type("text/xml").send(voiceXml(config, voiceFailureReply(error), 0));
+    const reply = voiceFailureReply(error);
+    if (config.VOICE_TRANSPORT === "relay") {
+      reply.transfer = false;
+      reply.end = true;
+    }
+    response.status(200).type("text/xml").send(voiceXml(config, reply, 0));
   });
   return app;
 }

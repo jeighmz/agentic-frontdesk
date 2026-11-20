@@ -6,13 +6,13 @@ import { test, type TestContext } from "node:test";
 import twilio from "twilio";
 import { WebSocket } from "ws";
 import { z } from "zod";
-import { createApp } from "./app.ts";
-import { DemoKnowledge, DemoPlanner, MemoryStore } from "./adapters.ts";
-import { readConfig } from "./config.ts";
-import { ConversationRelay } from "./conversation-relay.ts";
-import type { VoiceHandler } from "./domain.ts";
-import { Frontdesk } from "./frontdesk.ts";
-import { ModelUsageLimitError } from "./model-guard.ts";
+import { createApp } from "../src/app.ts";
+import { DemoKnowledge, DemoPlanner, MemoryStore } from "../src/adapters.ts";
+import { readConfig } from "../src/config.ts";
+import { ConversationRelay } from "../src/conversation-relay.ts";
+import type { VoiceHandler } from "../src/domain.ts";
+import { Frontdesk } from "../src/frontdesk.ts";
+import { ModelUsageLimitError } from "../src/model-guard.ts";
 
 const callId = `CA${"a".repeat(32)}`;
 const accountId = `AC${"b".repeat(32)}`;
@@ -292,8 +292,9 @@ test("a missing setup times out and releases the single reserved call slot", { t
 test("invalid setup, malformed/provider messages and frame floods fail closed without leaking payloads", { timeout: 5000 }, async (t) => {
   for (const failure of ["setup", "malformed", "provider", "flood"]) {
     await t.test(failure, async (t) => {
-      const f = await fixture(t);
-      const c = await f.connect(await f.reserve());
+      const f = await fixture(t, { staff: "+15555550199" });
+      const reserved = await f.reserve();
+      const c = await f.connect(reserved);
       if (failure === "setup") {
         c.send({ ...f.setup, callSid: `CA${"d".repeat(32)}` });
       } else {
@@ -304,10 +305,25 @@ test("invalid setup, malformed/provider messages and frame floods fail closed wi
         else for (let index = 0; index < 100; index += 1) c.send({ type: "info" });
       }
       assert.equal((await c.next()).type, "end");
+      const xml = await (await f.post(reserved.callback, { CallSid: callId })).text();
+      assert.match(xml, /<Hangup\s*\/>/);
+      assert.doesNotMatch(xml, /<Dial|<Say|ConversationRelay/);
       assert.equal(f.calls.length, failure === "setup" ? 0 : 1);
       assert.ok(!f.logs.join().includes("private-"));
     });
   }
+});
+
+test("relay HTTP errors hang up without an unannounced transfer or a fallback voice", { timeout: 5000 }, async (t) => {
+  const f = await fixture(t, { staff: "+15555550199" });
+  t.mock.method(f.relay, "start", () => { throw new Error("private-admission-error"); });
+  const response = await f.post("/voice", { CallSid: callId });
+  const xml = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(xml, /<Hangup\s*\/>/);
+  assert.doesNotMatch(xml, /<Dial|<Say|ConversationRelay/);
+  assert.match(f.logs.join(), /voice_request_failed/);
+  assert.ok(!f.logs.join().includes("private-admission-error"));
 });
 
 test("model-guard failures use an explicit terminal voice response instead of reconnecting or retrying", { timeout: 5000 }, async (t) => {

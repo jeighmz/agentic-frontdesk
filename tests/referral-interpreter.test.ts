@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { AzureOpenAI } from "openai";
-import { readConfig } from "./config.ts";
-import { AzureReferralInterpreter, type ReferralContext, type ReferralIntent } from "./referral-interpreter.ts";
-import { AzurePlanner } from "./adapters.ts";
-import { ModelRequestGuard, ModelUsageLimitError } from "./model-guard.ts";
+import { readConfig } from "../src/config.ts";
+import { AzureReferralInterpreter, type ReferralContext, type ReferralIntent } from "../src/referral-interpreter.ts";
+import { AzurePlanner } from "../src/adapters.ts";
+import { ModelRequestGuard, ModelUsageLimitError } from "../src/model-guard.ts";
 
 beforeEach(() => {
   mock.method(console, "log", () => {});

@@ -640,6 +640,33 @@ but stalls, the last dependency-start log identifies the operation to investigat
 HTTP 200 on the final error response means the app returned a spoken error/handoff
 message, **not** that the requested operation succeeded.
 
+## Front desk observability UI
+
+Set `MONITOR_TOKEN` (at least 16 characters) to enable a read-only dashboard at
+`PUBLIC_BASE_URL/monitor?token=<MONITOR_TOKEN>`:
+
+- **Call transcripts** as a chat log: caller speech and agent replies per turn,
+  with per-call status (`active`, `ended`, `transfer`, or `failed`). Transcripts
+  are captured in memory by wrapping the voice handler, so they work with both
+  the `gather` and `relay` transports and are lost on restart. Memory is bounded
+  (20 most recent calls, 60 turns per call, truncated text).
+- **Appointment slots**: in referrals mode, the next upcoming demo slots across
+  all clinics from Cosmos (including `booked`/`blocked` status, clinic names
+  cached for five minutes); in demo/cloud mode, the state-store slots with
+  booked status derived from appointments. Once a patient and referral are
+  identified on the selected call, the panel automatically narrows to that
+  referral's clinic and service (with a "show all" toggle), and the call list
+  shows the identified demo patient's name.
+
+The page polls `/monitor/api/state` every 2.5 seconds; slot results are cached
+server-side for 10 seconds so polling does not hammer Cosmos, and monitor reads
+are not written to the operational log (only `monitor_slots_failed` failures
+are). All `/monitor` routes
+require the token via the `?token=` query or an `Authorization: Bearer` header
+and return 401 otherwise; leaving `MONITOR_TOKEN` empty disables the routes
+entirely. The dashboard displays synthetic demo data only, but treat the token
+like a credential anyway since transcripts are visible to anyone holding it.
+
 ## Boundaries and next steps
 
 - **Not production-ready or a claim of HIPAA compliance.** Before real use:

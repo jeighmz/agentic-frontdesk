@@ -13,7 +13,8 @@ type Event =
   | "dependency_operation_started" | "dependency_operation_completed" | "dependency_operation_failed"
   | "llm_request_blocked"
   | "relay_call_rejected" | "relay_session_started" | "relay_session_ended"
-  | "relay_session_failed" | "relay_input_rejected" | "relay_handoff_ended";
+  | "relay_session_failed" | "relay_input_rejected" | "relay_handoff_ended"
+  | "monitor_request_rejected" | "monitor_slots_failed";
 type Details = {
   operation?: Operation;
   mode?: "demo" | "cloud" | "referrals";

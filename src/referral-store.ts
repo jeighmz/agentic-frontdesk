@@ -66,6 +66,18 @@ export function availabilityQuery(service: Service, now: number, windows: Availa
   };
 }
 
+export function monitorSlotsQuery(now: number, limit: number): SqlQuerySpec {
+  return {
+    query: `SELECT TOP @limit * FROM c WHERE c.is_demo = true AND c.demo_dataset = @dataset
+      AND c.starts_at > @now ORDER BY c.starts_at ASC`,
+    parameters: [
+      { name: "@limit", value: limit },
+      { name: "@dataset", value: AVAILABILITY_DATASET },
+      { name: "@now", value: new Date(now).toISOString() },
+    ],
+  };
+}
+
 export async function assertPartitionKey(container: Container, key: string): Promise<void> {
   const { resource } = await container.read();
   if (resource?.partitionKey?.paths.length !== 1 || resource.partitionKey.paths[0] !== key) {
@@ -146,6 +158,21 @@ export class CosmosReferralStore implements ReferralStore {
 
   async availability(clinicId: string, service: Service, now: number, windows: AvailabilityWindow[] = []): Promise<AppointmentSlot[]> {
     return observeOperation("cosmos.slots.query", () => readAvailableSlots(this.slots, clinicId, service, now, windows));
+  }
+
+  // Monitor-only reads: not wrapped in observeOperation so dashboard polling
+  // does not flood the operational log. Failures are logged by the monitor router.
+  async upcomingSlots(now: number, limit = 60): Promise<AppointmentSlot[]> {
+    const result = await this.slots.items.query(monitorSlotsQuery(now, limit)).fetchAll();
+    return result.resources.map((document) => slotSchema.parse(document));
+  }
+
+  async listClinics(): Promise<Clinic[]> {
+    const result = await this.clinics.items.query({
+      query: "SELECT * FROM c WHERE c.is_demo = true AND c.demo_dataset = @dataset",
+      parameters: [{ name: "@dataset", value: DATASET }],
+    }).fetchAll();
+    return result.resources.map((document) => clinicSchema.parse(document));
   }
 
   async book(request: BookingRequest): Promise<BookingResult> {

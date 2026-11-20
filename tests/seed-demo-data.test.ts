@@ -3,8 +3,8 @@ import { test } from "node:test";
 import {
   DEFAULT_AS_OF, generateClinics, generatePatients, referralStatuses, validateDemoData,
   type Clinic, type Patient,
-} from "./scripts/demo-data.ts";
-import { main, upsertClinics, upsertPatients } from "./scripts/seed-demo-data.ts";
+} from "../src/scripts/demo-data.ts";
+import { main, upsertClinics, upsertPatients } from "../src/scripts/seed-demo-data.ts";
 
 test("seeded generation is deterministic, varied and referentially consistent", () => {
   const clinics = generateClinics();

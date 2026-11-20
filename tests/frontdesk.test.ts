@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { test } from "node:test";
 import twilio from "twilio";
-import { createApp } from "./app.ts";
-import { DemoKnowledge, DemoPlanner, MemoryStore } from "./adapters.ts";
-import { readConfig } from "./config.ts";
-import { Frontdesk } from "./frontdesk.ts";
-import { StateConflict, seedState, type Planner } from "./domain.ts";
+import { createApp } from "../src/app.ts";
+import { DemoKnowledge, DemoPlanner, MemoryStore } from "../src/adapters.ts";
+import { readConfig } from "../src/config.ts";
+import { Frontdesk } from "../src/frontdesk.ts";
+import { StateConflict, seedState, type Planner } from "../src/domain.ts";
 
 const now = Date.parse("2030-01-07T12:00:00Z");
 const callId = `CA${"a".repeat(32)}`;

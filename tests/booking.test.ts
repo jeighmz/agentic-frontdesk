@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, mock, test } from "node:test";
-import { generateAvailability } from "./availability.ts";
-import { bookReferral, type BookingRequest } from "./booking.ts";
-import { generateClinics, generatePatients } from "./scripts/demo-data.ts";
+import { generateAvailability } from "../src/availability.ts";
+import { bookReferral, type BookingRequest } from "../src/booking.ts";
+import { generateClinics, generatePatients } from "../src/scripts/demo-data.ts";
 import { memoryBookingDocuments } from "./test-support/booking-documents.ts";
 
 const asOf = "2026-11-18T23:00:00.000Z";

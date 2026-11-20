@@ -14,6 +14,8 @@ const shared = z.object({
   TWILIO_AUTH_TOKEN: z.string().min(1),
   VOICE_TRANSPORT: z.enum(["gather", "relay"]).default("gather"),
   ELEVENLABS_VOICE_ID: z.string().regex(/^[A-Za-z0-9]{20}$/).default("21m00Tcm4TlvDq8ikWAM"),
+  // Empty disables the /monitor observability UI.
+  MONITOR_TOKEN: z.union([z.literal(""), z.string().min(16)]).default(""),
   STAFF_PHONE_NUMBER: z.union([z.literal(""), z.string().regex(/^\+[1-9]\d{7,14}$/)]).default(""),
   HOSPITAL_TIME_ZONE: z.string().default("America/New_York").refine((value) => {
     try {

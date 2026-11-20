@@ -7,18 +7,19 @@ import { WebSocket } from "ws";
 import { Temporal } from "@js-temporal/polyfill";
 import {
   availabilityWindows, generateAvailability, type AppointmentSlot, type AvailabilityWindow,
-} from "./availability.ts";
-import { createApp } from "./app.ts";
-import { bookReferral, type BookingRequest } from "./booking.ts";
-import { readConfig } from "./config.ts";
-import { ReferralFrontdesk } from "./referral-frontdesk.ts";
-import { ConversationRelay } from "./conversation-relay.ts";
-import { readAvailableSlots, readPatientsByFullName, type ReferralStore } from "./referral-store.ts";
-import { generateClinics, generatePatients } from "./scripts/demo-data.ts";
-import { insertMissingSlots } from "./scripts/seed-availability.ts";
-import { normalizePatientFullName, type Patient } from "./referral-models.ts";
+} from "../src/availability.ts";
+import { createApp } from "../src/app.ts";
+import { bookReferral, type BookingRequest } from "../src/booking.ts";
+import { readConfig } from "../src/config.ts";
+import { ReferralFrontdesk } from "../src/referral-frontdesk.ts";
+import { ModelUsageLimitError } from "../src/model-guard.ts";
+import { ConversationRelay } from "../src/conversation-relay.ts";
+import { readAvailableSlots, readPatientsByFullName, type ReferralStore } from "../src/referral-store.ts";
+import { generateClinics, generatePatients } from "../src/scripts/demo-data.ts";
+import { insertMissingSlots } from "../src/scripts/seed-availability.ts";
+import { normalizePatientFullName, type Patient } from "../src/referral-models.ts";
 import { memoryBookingDocuments } from "./test-support/booking-documents.ts";
-import type { ReferralInterpreter } from "./referral-interpreter.ts";
+import type { ReferralInterpreter } from "../src/referral-interpreter.ts";
 
 const asOf = "2026-11-18T23:00:00.000Z";
 const now = Date.parse(asOf);
@@ -215,7 +216,7 @@ test("Cosmos applies preferred windows before TOP 3 and rejects results outside 
 });
 
 test("natural-language preferences and slot selections require a separate clear confirmation", async (t) => {
-  const contexts: import("./referral-interpreter.ts").ReferralContext[] = [];
+  const contexts: import("../src/referral-interpreter.ts").ReferralContext[] = [];
   const f = fixture({
     async interpret(context) {
       contexts.push(context);
@@ -282,7 +283,7 @@ test("natural confirmation replay submits the same proposed appointment only onc
 
 test("natural rejection, conditional answers and requests for another slot do not confirm a booking", async (t) => {
   t.mock.method(console, "log", () => {});
-  const replies: { speech: string; intent: import("./referral-interpreter.ts").ReferralIntent }[] = [
+  const replies: { speech: string; intent: import("../src/referral-interpreter.ts").ReferralIntent }[] = [
     { speech: "Please do not book that appointment", intent: { action: "decline_booking" } },
     { speech: "What time was that again?", intent: { action: "clarify" } },
     { speech: "Yes, but could it be later?", intent: { action: "clarify" } },
@@ -333,13 +334,15 @@ test("confirmation interpretation failures never fall back to booking", async (t
   await f.handler.handle("call", 0, "");
   await f.handler.handle("call", 1, f.patient.id);
   await f.handler.handle("call", 2, "book option one");
-  await assert.rejects(f.handler.handle("call", 3, "Yes, that works for me"), /Classifier unavailable/);
+  const clarified = await f.handler.handle("call", 3, "Yes, that works for me");
+  assert.match(clarified.reply.message, /Say yes to confirm or no to discard/);
+  assert.equal(clarified.reply.end, false);
   assert.equal(booking.mock.callCount(), 0);
-  assert.match((await f.handler.handle("call", 3, "yes")).reply.message, /Your demo appointment is booked/);
+  assert.match((await f.handler.handle("call", clarified.turn, "yes")).reply.message, /Your demo appointment is booked/);
   assert.equal(booking.mock.callCount(), 1);
 });
 
-test("model choices not actually offered cannot book, and interpreter failures propagate", async (t) => {
+test("model choices not actually offered cannot book, and interpreter failures reprompt without ending the call", async (t) => {
   const f = fixture({
     async interpret() {
       return { action: "choose_slot", choice: 3 };
@@ -353,9 +356,36 @@ test("model choices not actually offered cannot book, and interpreter failures p
   await f.handler.handle("call", 1, f.patient.id);
   assert.match((await f.handler.handle("call", 2, "The third appointment please")).reply.message, /Choose one of the offered options/);
   assert.equal(booking.mock.callCount(), 0);
-  const broken = fixture({ async interpret() { throw new Error("Upstream unavailable"); } });
+
+  // A transient interpreter failure is read-only: ask again and keep the session usable.
+  let fail = true;
+  const broken = fixture({
+    async interpret() {
+      if (fail) throw new Error("Upstream unavailable");
+      return { action: "patient_number", patientNumber: 1 };
+    },
+  });
   await broken.handler.handle("call", 0, "");
-  await assert.rejects(broken.handler.handle("call", 1, "I would like to schedule"), /Upstream unavailable/);
+  const reprompt = await broken.handler.handle("call", 1, "I would like to schedule");
+  assert.match(reprompt.reply.message, /Sorry, I did not catch that/);
+  assert.equal(reprompt.reply.end, false);
+  assert.equal(reprompt.reply.transfer, false);
+  const next = await broken.handler.handle("call", reprompt.turn, broken.patient.id);
+  assert.match(next.reply.message, /^Welcome, /);
+
+  // During a pending confirmation, a failure re-reads the proposal instead of booking or ending.
+  fail = false;
+  const confirmBooking = t.mock.method(broken.store, "book");
+  await broken.handler.handle("call", next.turn, "book option one");
+  fail = true;
+  const clarified = await broken.handler.handle("call", next.turn + 1, "hmm what was that time again");
+  assert.match(clarified.reply.message, /say yes to confirm/i);
+  assert.equal(confirmBooking.mock.callCount(), 0);
+
+  // Model-guard limits must stay terminal rather than silently retrying the model.
+  const limited = fixture({ async interpret() { throw new ModelUsageLimitError("process"); } });
+  await limited.handler.handle("call", 0, "");
+  await assert.rejects(limited.handler.handle("call", 1, "I would like to schedule"), ModelUsageLimitError);
 });
 
 test("AI full-name identification retains exact lookup and explicit referral selection", async () => {

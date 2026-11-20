@@ -244,7 +244,7 @@ export class ConversationRelay {
       this.end(call, ended("Final speech could not be verified. Ask staff to verify any booking before trying again."), "provider_error");
       return;
     }
-    this.end(call, call.providerLimited ? voiceFailureReply(error)
+    this.end(call, call.providerLimited ? ended(voiceFailureReply(error).message)
       : ended("The real-time voice connection could not be established. Please contact the hospital directly. Goodbye."), "provider_error");
   }
 

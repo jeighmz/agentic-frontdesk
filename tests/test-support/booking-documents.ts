@@ -1,7 +1,7 @@
 import type { PatchOperation, RequestOptions } from "@azure/cosmos";
-import type { BookingDocuments } from "../booking.ts";
-import { slotSchema, type AppointmentSlot } from "../availability.ts";
-import { patientSchema, type Clinic, type Patient } from "../referral-models.ts";
+import type { BookingDocuments } from "../../src/booking.ts";
+import { slotSchema, type AppointmentSlot } from "../../src/availability.ts";
+import { patientSchema, type Clinic, type Patient } from "../../src/referral-models.ts";
 
 type PatchEvent = { container: "patients" | "slots"; id: string; operations: PatchOperation[]; phase: "before" | "after" };
 

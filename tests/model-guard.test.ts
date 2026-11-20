@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ModelRequestGuard, ModelUsageLimitError } from "./model-guard.ts";
+import { ModelRequestGuard, ModelUsageLimitError } from "../src/model-guard.ts";
 
 test("a rolling minute allows ten requests and blocks the next until the oldest expires", async (t) => {
   const warnings: string[] = [];
