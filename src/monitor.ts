@@ -44,6 +44,7 @@ export type MonitorCall = {
   startedAt: string;
   updatedAt: string;
   status: "active" | "ended" | "transfer" | "failed";
+  endedBy: "caller" | "agent" | "system" | null;
   context: CallContext | null;
   turns: MonitorTurn[];
 };
@@ -87,17 +88,29 @@ export class CallMonitor {
       .reverse();
   }
 
+  // Transport-level end signal: who hung up, independent of the last reply.
+  endCall(callId: string, by: "caller" | "agent" | "system"): void {
+    const call = this.calls.get(callId);
+    if (!call) return;
+    call.updatedAt = new Date(this.now()).toISOString();
+    call.endedBy = by;
+    if (call.status === "active") call.status = "ended";
+  }
+
   private record(
     callId: string, turn: number, speech: string, reply: Reply | null, failed: boolean,
     contextOf?: (callId: string) => CallContext | null,
   ): void {
     const at = new Date(this.now()).toISOString();
     const call = this.calls.get(callId)
-      ?? { callId, startedAt: at, updatedAt: at, status: "active" as const, context: null, turns: [] };
+      ?? { callId, startedAt: at, updatedAt: at, status: "active" as const, endedBy: null, context: null, turns: [] };
     // Reinsertion keeps the map ordered from least to most recently updated.
     this.calls.delete(callId);
     call.updatedAt = at;
-    call.status = failed ? "failed" : reply?.transfer ? "transfer" : reply?.end ? "ended" : "active";
+    call.status = failed ? "failed" : reply?.transfer ? "transfer" : reply?.end ? "ended"
+      : call.endedBy ? "ended" : "active";
+    if (failed) call.endedBy = "system";
+    else if (reply?.end || reply?.transfer) call.endedBy = "agent";
     call.context = contextOf?.(callId) ?? call.context;
     const entry: MonitorTurn = {
       turn, at,
@@ -193,6 +206,7 @@ const PAGE = `<!doctype html>
   .bubble.caller { background: var(--caller); margin-left: auto; border-bottom-right-radius: 3px; }
   .bubble.agent { background: var(--agent); margin-right: auto; border-bottom-left-radius: 3px; }
   .bubble.failed { border: 1px solid var(--red); }
+  .endnote { text-align: center; color: var(--muted); font-size: 11px; margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .06em; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px; position: sticky; top: 0; background: var(--bg); }
   td { padding: 5px 8px; border-top: 1px solid var(--line); vertical-align: top; }
@@ -229,6 +243,9 @@ const PAGE = `<!doctype html>
   const slotFmt = (iso, tz) => new Intl.DateTimeFormat("en-US", {
     timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   }).format(new Date(iso));
+  const endLabel = (call) => call.endedBy === "caller" ? "caller hung up"
+    : call.endedBy === "agent" ? (call.status === "transfer" ? "transferred to staff" : "agent ended call")
+    : call.endedBy === "system" ? "ended by system" : null;
 
   function renderCalls() {
     const box = document.getElementById("calls");
@@ -239,7 +256,8 @@ const PAGE = `<!doctype html>
       item.append(el("div", "id", call.callId));
       if (call.context && call.context.patient) item.append(el("div", "patient", call.context.patient));
       const meta = el("div", "meta");
-      meta.append(el("span", null, timeFmt.format(new Date(call.updatedAt))), el("span", "chip " + call.status, call.status));
+      meta.append(el("span", null, timeFmt.format(new Date(call.updatedAt))),
+        el("span", "chip " + call.status, endLabel(call) ?? call.status));
       item.append(meta);
       item.onclick = () => { selected = call.callId; showAllSlots = false; render(); };
       box.append(item);
@@ -265,6 +283,8 @@ const PAGE = `<!doctype html>
       );
       box.append(bubble);
     }
+    const ended = endLabel(call);
+    if (ended) box.append(el("div", "endnote", "— " + ended + " —"));
     if (stick) box.scrollTop = box.scrollHeight;
   }
 

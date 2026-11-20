@@ -646,7 +646,10 @@ Set `MONITOR_TOKEN` (at least 16 characters) to enable a read-only dashboard at
 `PUBLIC_BASE_URL/monitor?token=<MONITOR_TOKEN>`:
 
 - **Call transcripts** as a chat log: caller speech and agent replies per turn,
-  with per-call status (`active`, `ended`, `transfer`, or `failed`). Transcripts
+  with per-call status (`active`, `ended`, `transfer`, or `failed`) and, once a
+  session ends, who ended it — `caller hung up` (WebSocket closed mid-call),
+  `agent ended call`/`transferred to staff` (terminal reply), or `ended by
+  system` (duration limit, setup/playback timeout, or provider error). Transcripts
   are captured in memory by wrapping the voice handler, so they work with both
   the `gather` and `relay` transports and are lost on restart. Memory is bounded
   (20 most recent calls, 60 turns per call, truncated text).

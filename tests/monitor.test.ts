@@ -62,6 +62,11 @@ test("monitor records transcripts with statuses, replay dedupe and bounded memor
   assert.equal(statuses[callSid("b")], "transfer");
   assert.equal(statuses[callSid("c")], "ended");
   assert.equal(statuses[callSid("d")], "failed");
+  const endedBy = Object.fromEntries(monitor.snapshot().map((entry) => [entry.callId, entry.endedBy]));
+  assert.equal(endedBy[callSid("a")], null);
+  assert.equal(endedBy[callSid("b")], "agent");
+  assert.equal(endedBy[callSid("c")], "agent");
+  assert.equal(endedBy[callSid("d")], "system");
   const failed = monitor.snapshot().find((entry) => entry.callId === callSid("d"));
   assert.equal(failed?.turns[0]?.failed, true);
   assert.equal(failed?.turns[0]?.agent, null);
@@ -146,6 +151,22 @@ test("cached slot views coalesce polls, expire after the TTL and never cache fai
   fail = false;
   assert.deepEqual(await view(), demoSlots);
   assert.equal(fetches, 4);
+});
+
+test("transport end signals mark who hung up without reactivation by replayed webhooks", async () => {
+  const monitor = new CallMonitor();
+  const wrapped = monitor.wrap(echoHandler());
+  await wrapped.handle(callSid("a"), 0, "");
+  monitor.endCall(callSid("a"), "caller");
+  let [call] = monitor.snapshot();
+  assert.equal(call?.status, "ended");
+  assert.equal(call?.endedBy, "caller");
+  await wrapped.handle(callSid("a"), 1, "hello"); // late replay after hang-up
+  [call] = monitor.snapshot();
+  assert.equal(call?.status, "ended");
+  assert.equal(call?.endedBy, "caller");
+  monitor.endCall(callSid("z"), "agent"); // unknown calls are ignored
+  assert.equal(monitor.snapshot().length, 1);
 });
 
 test("handler call context is captured per call and exposed in snapshots", async () => {

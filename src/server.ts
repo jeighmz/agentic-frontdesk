@@ -79,7 +79,9 @@ const services = await initialize(config);
 const monitor = config.MONITOR_TOKEN ? new CallMonitor() : null;
 const frontdesk = monitor ? monitor.wrap(services.frontdesk, services.contextOf) : services.frontdesk;
 const monitorRouter = monitor ? createMonitorRouter(config.MONITOR_TOKEN, monitor, services.slots) : undefined;
-const relay = config.VOICE_TRANSPORT === "relay" ? new ConversationRelay(config, frontdesk) : undefined;
+const relay = config.VOICE_TRANSPORT === "relay"
+  ? new ConversationRelay(config, frontdesk, undefined, monitor ? (callId, by) => monitor.endCall(callId, by) : undefined)
+  : undefined;
 const server = createServer(createApp(config, frontdesk, relay, monitorRouter));
 relay?.attach(server);
 server.listen(config.PORT, () => {

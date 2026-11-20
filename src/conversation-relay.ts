@@ -38,6 +38,7 @@ type Call = {
   cleanupTimer?: ReturnType<typeof setTimeout>;
 };
 type LimitCall = (accountSid: string, callSid: string, seconds: number) => Promise<void>;
+export type RelayEndedBy = "caller" | "agent" | "system";
 
 function ended(message: string): Reply {
   return { message, transfer: false, end: true };
@@ -52,10 +53,15 @@ export class ConversationRelay {
   private sockets = new WebSocketServer({ noServer: true, maxPayload: 8192, perMessageDeflate: false });
   private detach: (() => void) | null = null;
   private closed = false;
+  private onEnded: ((callId: string, by: RelayEndedBy) => void) | undefined;
 
-  constructor(config: Config, frontdesk: VoiceHandler, limitCall?: LimitCall) {
+  constructor(
+    config: Config, frontdesk: VoiceHandler, limitCall?: LimitCall,
+    onEnded?: (callId: string, by: RelayEndedBy) => void,
+  ) {
     this.config = config;
     this.frontdesk = frontdesk;
+    this.onEnded = onEnded;
     this.limitCall = limitCall ?? (async (accountSid, callSid, seconds) => {
       await twilio(accountSid, config.TWILIO_AUTH_TOKEN, { autoRetry: false, timeout: 3000 })
         .calls(callSid).update({ timeLimit: seconds });
@@ -257,6 +263,7 @@ export class ConversationRelay {
     clearTimeout(call.setupTimer);
     clearTimeout(call.playbackTimer);
     log("info", "relay_session_ended", { reason });
+    this.onEnded?.(call.id, reason === "ended" ? "agent" : reason === "transport_closed" ? "caller" : "system");
     this.send(call, { type: "end", handoffData: JSON.stringify({ reason }) });
     call.cleanupTimer = setTimeout(() => this.release(call), 5_000);
     call.cleanupTimer.unref();

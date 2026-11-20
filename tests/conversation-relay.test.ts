@@ -47,9 +47,10 @@ async function fixture(t: TestContext, options: {
     },
   };
   const limits: { account: string; call: string; seconds: number }[] = [];
+  const ends: { callId: string; by: string }[] = [];
   const relay = new ConversationRelay(config, handler, options.limitCall ?? (async (account, call, seconds) => {
     limits.push({ account, call, seconds });
-  }));
+  }), (id, by) => ends.push({ callId: id, by }));
   const server = createServer(createApp(config, handler, relay));
   relay.attach(server);
   server.listen(0, "127.0.0.1");
@@ -118,7 +119,7 @@ async function fixture(t: TestContext, options: {
     return { ws, next, send, buffered, flush };
   }
   const setup = { type: "setup", callSid: callId, accountSid: accountId };
-  return { config, relay, store, calls, limits, logs, origin, post, reserve, reservation, connect, setup };
+  return { config, relay, store, calls, limits, ends, logs, origin, post, reserve, reservation, connect, setup };
 }
 
 test("relay is opt-in and rejects invalid transport or voice configuration", () => {
@@ -209,6 +210,7 @@ test("live text turns preserve explicit booking confirmation, interruption safet
     assert.doesNotMatch(handoff, /<Say|ConversationRelay/);
   }
   assert.match(f.logs.join(), /relay_handoff_ended.*handoff_failed/);
+  assert.deepEqual(f.ends, [{ callId, by: "agent" }]);
   assert.deepEqual(f.calls.map(({ speech }) => speech), ["", "book slot-2", "yes", "staff"]);
   assert.ok(!f.logs.join().includes("private partial transcript"));
   assert.ok(!f.logs.join().includes(callId));
@@ -405,11 +407,14 @@ test("provider failure or disconnect during final speech cannot trigger a staff 
         const closed = once(c.ws, "close");
         c.ws.close();
         await closed;
+        // The server observes the close asynchronously; wait for it before the webhook.
+        while (!f.ends.length) await setImmediate();
       }
       const xml = await (await f.post(reserved.callback, { CallSid: callId })).text();
       assert.match(xml, /<Hangup\s*\/>/);
       assert.doesNotMatch(xml, /<Dial|<Say|ConversationRelay/);
       assert.equal(f.calls.length, 1);
+      assert.deepEqual(f.ends, [{ callId, by: failure === "provider" ? "system" : "caller" }]);
       assert.ok(!f.logs.join().includes("private-"));
     });
   }
